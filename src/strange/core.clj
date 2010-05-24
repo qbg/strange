@@ -5,239 +5,283 @@
 (def instructions {})
 
 (defmacro definstr
-  [name [& bindings] & body]
+  [name [& args] & body]
   `(alter-var-root
-    #'instructions assoc '~name
-    (fn 
-      [args# ~'state]
-      (let [[~@bindings] args#]
-	~@body))))
+    #'instructions
+    assoc '~name
+    (fn [[~@args] ~'state]
+      ~@body)))
 
-(defmacro update
-  [k f & args]
-  `(update-in ~'state [~k] ~f ~@args))
+(definstr :enter [n]
+  (let [[vals data] (split-at n (:data state))
+	regs (zipmap (range n) vals)]
+    (assoc state
+      :data data
+      :regs regs)))
 
-(defn memofn
-  "Produce a lazily evaluated functional value (function of no arguments)"
-  [f]
-  (let [val (atom ::initial)]
-    (fn []
-      (if (= @val ::initial)
-	(reset! val f)
-	@val))))
+(definstr :get [n]
+  (assoc state :data (conj (:data state) ((:regs state) n))))
 
-(defn run-instr
-  [state instr]
-  ((instructions (first instr)) (rest instr) state))
+(definstr :closure [& code]
+  (let [data (:data state)
+	f {:code code :regs (:regs state)
+	   :result (atom ::init)}
+	data (conj data f)]
+    (assoc state :data data)))
 
-(defn run-code
-  [code locals env cache]
-  (let [istate {:locals locals :env env :cache cache}
-	state (reduce run-instr istate code)]
-    (first (:data state))))
-
-(definstr :push [val]
-  (update :data conj val))
-
-(defn cook-fn
-  [f state]
-  (if (= (count (:args f)) (:arity f))
-    (let [mf (memofn #(run-code (:code f)
-				(:args f)
-				(:env state)
-				(:cache state)))]
-      (if (:strict? f)
-	(trampoline mf)
-	mf))
+(defn cook
+  [state f]
+  (if (= (:arity f) (count (:args f)))
+    {:code `(~@(map (fn [v] `(:push ~v)) (reverse (:args f)))
+	     (:jumpg ~(:sc f)))
+     :result (atom ::init)}
     f))
 
-(definstr :pushval [sym]
-  (let [pushv
-	(if-let [val (get @(:cache state) sym)]
-	  val
-	  (let [code ((:env state) sym)
-		f {:code (rest code)
-		   :arity ((first code) 0)
-		   :strict? ((first code) 1)}
-		cooked (cook-fn f state)]
-	    (swap! (:cache state) assoc sym cooked)
-	    cooked))]
-    (update :data conj pushv)))
-
-(definstr :pop [n]
-  (update :data nthnext n))
-
-(definstr :local [n]
-  (update :data conj (nth (:locals state) n)))
-
-(definstr :cljcall [n sym]
-  (let [args (take n (:data state))
-	data (nthnext (:data state) n)]
-    (assoc state :data (conj data (apply @(resolve sym) args)))))
-
-(definstr :if []
-  (let [[pred true-case false-case & data] (:data state)]
-    (assoc state :data (conj data (if pred true-case false-case)))))
+(definstr :pushsc [sym]
+  (if (contains? (:cache state) sym)
+    (assoc state :data (conj (:data state) ((:cache state) sym)))
+    (let [partial {:sc sym :arity (first ((:env state) sym))}
+	  data (conj (:data state) partial)
+	  cache (assoc (:cache state {}) sym partial)]
+      (assoc state :data data))))
 
 (definstr :curry [n]
-  (let [f (first (:data state))
-	f (if (fn? f) (trampoline f) f)
-	[vals data] (split-at n (rest (:data state)))
-	args (concat (:args f) vals)
-	newf (cook-fn (assoc f :args args) state)]
-    (assoc state :data (conj data newf))))
+  (let [fun (first (:data state))
+	[args data] (split-at n (next (:data state)))
+	args (concat (:args fun) args)
+	res (cook state (assoc fun :args args))]
+    (assoc state :data (conj data res))))
 
-(definstr :unbox []
-  (let [[val & data] (:data state)
-	val (if (fn? val)
-	      (trampoline val)
-	      val)]
-    (assoc state :data (conj data val))))
+(definstr :jump []
+  (let [[f & data] (:data state)
+	code (:code f)
+	regs (:regs f)]
+    (assoc state
+      :data data
+      :code code
+      :regs regs)))
 
-;;; Compiler
+(definstr :mjump []
+  (let [[f & data] (:data state)
+	code (:code f)
+	regs (:regs f)
+	res (:result f)
+	result (conj (:result state) res)]
+    (if (= @res ::init)
+      (assoc state
+	:data data
+	:code code
+	:regs regs
+	:result result)
+      (let [data (conj data @res)]
+	((instructions :ret-val)
+	 nil
+	 (assoc state
+	   :data data
+	   :result (conj (:result state) nil)))))))
 
-(defmacro compile-primitives
-  [& forms]
-  `'~(zipmap
-      (map first forms)
-      (map (fn [[sym n]]
-	     `([~n true]
-	       ~@(mapcat (fn [i]
-			   `((:local ~(- n 1 i))
-			     (:unbox)))
-			 (range n))
-	       (:cljcall ~n ~sym)))
-	   forms)))
+(definstr :jumpg [sym]
+  (let [code (next ((:env state) sym))]
+    (assoc state
+      :code code)))
 
-(defn s-cons
-  [first rest]
-  {:f first, :r rest})
+(definstr :eval [& code]
+  ;; save state and then execute the code on the top of the stack
+  (let [cstack (conj (:cstack state) (:code state))
+	rstack (conj (:rstack state) (:regs state))]
+    (assoc state
+      :code code
+      :cstack cstack
+      :rstack rstack)))
 
-(defn s-first
-  [cons]
-  (:f cons))
+(definstr :case [tag & code]
+  (let [[e & data] (:data state)]
+    (cond
+     (and (vector? e) (= (first e) tag))
+     (let [nregs (zipmap (iterate dec -1) (rest e))
+	   regs (merge (:regs state) nregs)]
+       (assoc state
+	 :data data
+	 :code code
+	 :regs regs))
 
-(defn s-rest
-  [cons]
-  (:r cons))
+     (or (= e tag) (= tag :default))
+     (let [regs (merge (:regs state) {-1 e})]
+       (assoc state
+	 :data data
+	 :code code
+	 :regs regs))
 
-(def low-primitives
-     '{cons
-       [[2 true]
-	(:local 1)
-	(:local 0)
-	(:cljcall 2 s-cons)]
+     :else
+     state)))
 
-       first
-       [[1 true]
-	(:local 0)
-	(:unbox)
-	(:cljcall 1 s-first)]
+(definstr :push [item]
+  (let [data (conj (:data state) item)]
+    (assoc state :data data)))
 
-       rest
-       [[1 true]
-	(:local 0)
-	(:unbox)
-	(:cljcall 1 s-rest)]
+(definstr :ret-val []
+  (let [cstack (next (:cstack state))
+	rstack (next (:rstack state))
+	code (first (:cstack state))
+	regs (first (:rstack state))
+	nstate
+	(assoc state
+	  :cstack cstack
+	  :rstack rstack
+	  :code code
+	  :regs regs
+	  :result (next (:result state)))]
+    (if (first (:result state))
+      (reset! (first (:result state)) (first (:data state))))
+    nstate))
 
-       unbox
-       [[1 true]
-	(:local 0)]
-       
-       nil
-       [[0 true]
-	(:push)]})
+(definstr :cljcall [n sym]
+  (let [[args data] (split-at n (:data state))
+	val (apply @(resolve sym) args)
+	data (conj data val)]
+    (assoc state :data data)))
 
-(def standard-lib
-     (merge low-primitives
-	    (compile-primitives
-	     (+ 2)
-	     (- 2)
-	     (* 2)
-	     (/ 2)
-	     (zero? 1)
-	     (nil? 1))))
+(defn run-program
+  [prog]
+  (let [init {:code (next (prog 'main)) :regs {} :env prog}]
+    (loop [state init]
+      (if (seq (:code state))
+	(recur ((instructions (first (first (:code state))))
+		(rest (first (:code state)))
+		(assoc state :code (next (:code state)))))
+	(first (:data state))))))
+
+;;;; Compiler
 
 (declare compile-form)
 
 (defn compile-lit
   [env lit]
-  `((:push ~lit)))
+  `((:closure (:push ~lit) (:ret-val))))
 
 (defn compile-symbol
   [env sym]
-  (if (get env sym)
-    `((:local ~(env sym)))
-    `((:pushval ~sym))))
-
-(defn compile-if
-  [env form]
-  (let [[pred t f] (rest form)]
-    `(~@(compile-form env f)
-      ~@(compile-form env t)
-      ~@(compile-form env pred)
-      (:unbox)
-      (:if))))
-
-(defn compile-quote
-  [env form]
-  `((:push ~(second form))))
+  (if (contains? env sym)
+    `((:get ~(env sym)))
+    `((:pushsc ~sym))))
 
 (defn compile-app
   [env form]
-  `(~@(mapcat (fn [frm] (compile-form env frm))
+  `(~@(mapcat #(compile-form env %)
 	      (reverse form))
-    (:unbox)
-    (:curry ~(dec (count form)))))
+    (:curry ~(count (next form)))))
+
+(defn compile-quote
+  [env form]
+  (compile-lit env (second form)))
+
+(defn compile-case
+  [env form]
+  (let [[_ d & forms] form]
+    `((:closure
+       (:eval ~@(compile-form env d) (:jump))
+       ~@(map (fn [[tag bindings body]]
+		(let [nenv (zipmap bindings (iterate dec -1))
+		      env (merge env nenv)]
+		  `(:case ~tag ~@(compile-form env body) (:jump))))
+	      (partition 3 forms))))))
 
 (defn compile-form
   [env form]
   ((cond
     (symbol? form) compile-symbol
-    (nil? form) compile-symbol
     (not (list? form)) compile-lit
-    (= (first form) 'if) compile-if
-    (= (first form) 'quote) compile-quote
+    (= 'quote (first form)) compile-quote
+    (= 'case (first form)) compile-case
     :else compile-app)
    env form))
 
 (defn args->env
   [args]
-  (into {} (map-indexed (fn [n x] [x n]) args)))
-
-(defn compile-fn
-  [args body]
-  (compile-form (args->env args) body))
+  (zipmap args (range)))
 
 (defn compile-define
   [form]
-  (let [[name args body] (rest form)]
-    {name (list* [(count args) false] (compile-fn args body))}))
+  (let [[_ name args body] form]
+    {name `(~(count args)
+	    (:enter ~(count args))
+	    ~@(compile-form (args->env args) body)
+	    (:jump))}))
 
 (defn compile-toplevel
   [form]
   ((cond
-    (= (first form) 'define) compile-define
-    :else (constantly {}))
+    (= 'define (first form)) compile-define)
    form))
 
+(defn s-cons
+  [first rest]
+  (vector 'cons first rest))
+
+(def low-prims
+     '{if
+       [3
+	(:enter 3)
+	(:eval (:get 0) (:mjump))
+	(:case true (:get 1) (:jump))
+	(:case false (:get 2) (:jump))]
+
+       nil
+       [0
+	(:push [nil])
+	(:ret-val)]
+
+       cons
+       [2
+	(:enter 2)
+	(:get 1)
+	(:get 0)
+	(:cljcall 2 s-cons)
+	(:ret-val)]
+
+       first
+       [1
+	(:enter 1)
+	(:eval (:get 0) (:jump))
+	(:case nil (:pushsc nil) (:jump))
+	(:case cons (:get -1) (:jump))]
+
+       rest
+       [1
+	(:enter 1)
+	(:eval (:get 0) (:jump))
+	(:case nil (:pushsc nil) (:jump))
+	(:case cons (:get -2) (:jump))]})
+       
+
+(def builtins
+     (->> '[[+ 2] [- 2] [* 2] [/ 2] [zero? 1] [nil? 1]]
+	  (map (fn [[op n]]
+		 {op
+		  `(~n
+		    (:enter ~n)
+		    ~@(map (fn [i] `(:eval (:get ~(- n 1 i)) (:mjump)))
+			   (range n))
+		    (:cljcall ~n ~op)
+		    (:ret-val))}))
+	  (apply merge low-prims)))
+
 (defn compile-program
-  [program]
-  (let [prog (apply merge (map compile-toplevel program))]
-    (merge standard-lib prog)))
+  [prog]
+  (apply merge
+	 builtins
+	 (map compile-toplevel prog)))
 
 (defn eval-program
-  [program]
-  (let [prog (compile-program program)
-	main (concat (rest (prog 'main)) '((:unbox)))]
-    (run-code main nil prog (atom {}))))
+  [prog]
+  (run-program (compile-program prog)))
 
 (def samp
-     '[(define square [n] (* n n))
-       (define main [] (square (+ 1 2)))])
+     '((define main [] (square (+ 1 2)))
+       (define square [n] (* n n))))
 
 (def samp2
-     '[(define fib-loop
+     '((define fib-loop
 	 [n a b]
 	 (if (zero? n)
 	   b
@@ -245,10 +289,10 @@
        (define fib
 	 [n]
 	 (fib-loop n 1 0))
-       (define main [] (fib 5000))])
+       (define main [] (fib 5000))))
 
 (def samp3
-     '[(define integers
+     '((define integers
 	 [n]
 	 (cons n (integers (+ n 1))))
        (define nth
@@ -256,25 +300,5 @@
 	 (if (zero? n)
 	   (first coll)
 	   (nth (rest coll) (- n 1))))
-       (define main [] (nth (integers 0) 5000))])
-
-(def samp4
-     '[(define map2
-	 [f coll1 coll2]
-	 (if (nil? coll1)
-	   nil
-	   (cons (f (first coll1) (first coll2))
-		 (map2 f (rest coll1) (rest coll2)))))
-        (define nth
-	 [coll n]
-	 (if (zero? n)
-	   (first coll)
-	   (nth (rest coll) (- n 1))))
-	(define fibs
-	  []
-	  (cons 0 (cons 1 nil)))
-	(define fib2
-	  []
-	  (map2 + fibs fibs))
-	(define main [] (nth fib2 1))])
+       (define main [] (nth (integers 0) 5000))))
 
