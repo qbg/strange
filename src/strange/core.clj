@@ -12,7 +12,8 @@
     (fn [[~@args] ~'state]
       ~@body)))
 
-(definstr :enter [n]
+(defn do-enter
+  [state n]
   (let [[vals data] (split-at n (:data state))
 	regs (zipmap (range n) vals)]
     (assoc state
@@ -22,83 +23,99 @@
 (definstr :get [n]
   (assoc state :data (conj (:data state) ((:regs state) n))))
 
+(defn create-closure
+  [code regs strict?]
+  (atom {:code code, :regs regs, :strict? strict?}))
+
 (definstr :closure [& code]
-  (let [data (:data state)
-	f {:code code :regs (:regs state)
-	   :result (atom ::init)}
-	data (conj data f)]
+  (let [data (conj (:data state) (create-closure code (:regs state) false))]
     (assoc state :data data)))
 
 (defn cook
   [state f]
   (if (= (:arity f) (count (:args f)))
-    {:code `(~@(map (fn [v] `(:push ~v)) (reverse (:args f)))
-	     (:jumpg ~(:sc f)))
-     :result (atom ::init)}
+    (create-closure `((:push ~@(:args f)) (:jumpg ~(:sc f))) nil (:strict? f))
     f))
+
+(defn strict-eval
+  [state]
+  (let [[f & data] (:data state)]
+    (if (and (instance? clojure.lang.Atom f) (map? @f))
+      (if (:strict? @f)
+	(let [code (concat '((:dup) (:eval) (:drop)) (:code state))]
+	  (assoc state :code code))
+	state)
+      state)))
 
 (definstr :pushsc [sym]
   (if (contains? (:cache state) sym)
     (assoc state :data (conj (:data state) ((:cache state) sym)))
-    (let [partial {:sc sym :arity (first ((:env state) sym))}
+    (let [[arity strict?] (first ((:env state) sym))
+	  partial (cook state {:sc sym :arity arity :strict? strict?})
 	  data (conj (:data state) partial)
 	  cache (assoc (:cache state {}) sym partial)]
-      (assoc state :data data))))
+      (strict-eval (assoc state :data data :cache cache)))))
 
 (definstr :curry [n]
   (let [fun (first (:data state))
 	[args data] (split-at n (next (:data state)))
 	args (concat (:args fun) args)
 	res (cook state (assoc fun :args args))]
-    (assoc state :data (conj data res))))
+    (strict-eval (assoc state :data (conj data res)))))
+
+(definstr :dup []
+  (let [[v & data] (:data state)]
+    (assoc state :data (conj data v v))))
+
+(definstr :drop []
+  (let [[v & data] (:data state)]
+    (assoc state :data data)))
+
+(defn do-jump
+  [state f]
+  (if (map? @f)
+    (let [code (:code @f)
+	  regs (:regs @f)]
+      (assoc state
+	:code code
+	:regs regs))
+    ((instructions :ret-val)
+     nil
+     (assoc state :data (conj (:data state) @f)))))
 
 (definstr :jump []
-  (let [[f & data] (:data state)
-	code (:code f)
-	regs (:regs f)]
-    (assoc state
-      :data data
-      :code code
-      :regs regs)))
-
-(definstr :mjump []
-  (let [[f & data] (:data state)
-	code (:code f)
-	regs (:regs f)
-	res (:result f)
-	result (conj (:result state) res)]
-    (if (= @res ::init)
-      (assoc state
-	:data data
-	:code code
-	:regs regs
-	:result result)
-      (let [data (conj data @res)]
-	((instructions :ret-val)
-	 nil
-	 (assoc state
-	   :data data
-	   :result (conj (:result state) nil)))))))
+  (let [[f & data] (:data state)]
+    (do-jump (assoc state :data data) f)))
 
 (definstr :jumpg [sym]
-  (let [code (next ((:env state) sym))]
-    (assoc state
+  (let [[n & code] ((:env state) sym)]
+    (assoc (do-enter state (n 0))
       :code code)))
 
-(definstr :eval [& code]
-  ;; save state and then execute the code on the top of the stack
-  (let [cstack (conj (:cstack state) (:code state))
-	rstack (conj (:rstack state) (:regs state))]
-    (assoc state
-      :code code
-      :cstack cstack
-      :rstack rstack)))
+(definstr :update [closure]
+  (let [val (first (:data state))]
+    (reset! closure val)
+    state))
 
-(definstr :case [tag & code]
+(definstr :eval []
+  ;;; Evaluate the closure on the top of the state, updating it as needed
+  (let [[closure & data] (:data state)]
+    (if (map? @closure)
+      ;; push a continuation and jump to the closure
+      (let [cont (create-closure `((:update ~closure) ~@(:code state))
+				 (:regs state)
+				 false)
+	    cstack (conj (:cstack state) cont)]
+	(do-jump (assoc state :data data :cstack cstack) closure))
+      ;; unbox the cached value
+      (let [data (conj data @closure)]
+	(assoc state :data data)))))
+
+(definstr :case [tag base & code]
   (let [[e & data] (:data state)]
     (cond
      (and (vector? e) (= (first e) tag))
-     (let [nregs (zipmap (iterate dec -1) (rest e))
+     (let [nregs (zipmap (iterate inc base) (rest e))
 	   regs (merge (:regs state) nregs)]
        (assoc state
 	 :data data
@@ -106,7 +123,7 @@
 	 :regs regs))
 
      (or (= e tag) (= tag :default))
-     (let [regs (merge (:regs state) {-1 e})]
+     (let [regs (merge (:regs state) {base e})]
        (assoc state
 	 :data data
 	 :code code
@@ -115,25 +132,18 @@
      :else
      state)))
 
-(definstr :push [item]
-  (let [data (conj (:data state) item)]
+(definstr :push [& items]
+  (let [data (concat items (:data state))]
+    (assoc state :data data)))
+
+(definstr :push-lit [item]
+  (let [data (conj (:data state) (atom item))]
     (assoc state :data data)))
 
 (definstr :ret-val []
-  (let [cstack (next (:cstack state))
-	rstack (next (:rstack state))
-	code (first (:cstack state))
-	regs (first (:rstack state))
-	nstate
-	(assoc state
-	  :cstack cstack
-	  :rstack rstack
-	  :code code
-	  :regs regs
-	  :result (next (:result state)))]
-    (if (first (:result state))
-      (reset! (first (:result state)) (first (:data state))))
-    nstate))
+  ;; Pop a continuation and jump to it
+  (let [[cont & cstack] (:cstack state)]
+    (do-jump (assoc state :cstack cstack) cont)))
 
 (definstr :cljcall [n sym]
   (let [[args data] (split-at n (:data state))
@@ -141,9 +151,15 @@
 	data (conj data val)]
     (assoc state :data data)))
 
+(definstr :pcons [type n]
+  (let [[vals data] (split-at n (:data state))
+	box (apply vector type vals)
+	data (conj data box)]
+    (assoc state :data data)))
+
 (defn run-program
   [prog]
-  (let [init {:code (next (prog 'main)) :regs {} :env prog}]
+  (let [init {:code (concat (next (prog 'main))) :regs {} :env prog}]
     (loop [state init]
       (if (seq (:code state))
 	(recur ((instructions (first (first (:code state))))
@@ -157,7 +173,7 @@
 
 (defn compile-lit
   [env lit]
-  `((:closure (:push ~lit) (:ret-val))))
+  `((:push-lit ~lit)))
 
 (defn compile-symbol
   [env sym]
@@ -179,20 +195,32 @@
   [env form]
   (let [[_ d & forms] form]
     `((:closure
-       (:eval ~@(compile-form env d) (:jump))
+       ~@(compile-form env d)
+       (:eval)
        ~@(map (fn [[tag bindings body]]
-		(let [nenv (zipmap bindings (iterate dec -1))
+		(let [base (count env)
+		      nenv (zipmap bindings (iterate inc base))
 		      env (merge env nenv)]
-		  `(:case ~tag ~@(compile-form env body) (:jump))))
+		  `(:case ~tag ~base ~@(compile-form env body) (:jump))))
 	      (partition 3 forms))))))
 
+(defn compile-pcons
+  [env form]
+  (let [[_ type & vals] form]
+    `((:closure
+       ~@(mapcat (fn [f] (compile-form env f)) (reverse vals))
+       (:pcons ~type ~(count vals))
+       (:ret-val)))))
+  
 (defn compile-form
   [env form]
   ((cond
     (symbol? form) compile-symbol
+    (nil? form) compile-symbol
     (not (list? form)) compile-lit
     (= 'quote (first form)) compile-quote
     (= 'case (first form)) compile-case
+    (= '%cons (first form)) compile-pcons
     :else compile-app)
    env form))
 
@@ -203,74 +231,86 @@
 (defn compile-define
   [form]
   (let [[_ name args body] form]
-    {name `(~(count args)
-	    (:enter ~(count args))
+    {name `([~(count args) false]
+	    ~@(compile-form (args->env args) body)
+	    ~(if (= name 'main) '(:eval) '(:jump)))}))
+
+(defn compile-defstrict
+  [form]
+  (let [[_ name args body] form]
+    {name `([~(count args) true]
 	    ~@(compile-form (args->env args) body)
 	    (:jump))}))
 
 (defn compile-toplevel
   [form]
   ((cond
-    (= 'define (first form)) compile-define)
+    (= 'define (first form)) compile-define
+    (= 'defstrict (first form)) compile-defstrict
+    :else (constantly {}))
    form))
 
-(defn s-cons
-  [first rest]
-  (vector 'cons first rest))
+(defn standalone-compile
+  [program]
+  (apply merge (map compile-toplevel program)))
 
-(def low-prims
-     '{if
-       [3
-	(:enter 3)
-	(:eval (:get 0) (:mjump))
-	(:case true (:get 1) (:jump))
-	(:case false (:get 2) (:jump))]
+(defn interop-compile
+  [forms]
+  (apply merge
+	 (map (fn [[op n]]
+		{op
+		 `([~n true]
+		   ~@(mapcat (fn [i] `((:get ~(- n 1 i)) (:eval)))
+			     (range n))
+		   (:cljcall ~n ~op)
+		   (:ret-val))})
+	      forms)))
 
-       nil
-       [0
-	(:push [nil])
-	(:ret-val)]
-
-       cons
-       [2
-	(:enter 2)
-	(:get 1)
-	(:get 0)
-	(:cljcall 2 s-cons)
-	(:ret-val)]
-
-       first
-       [1
-	(:enter 1)
-	(:eval (:get 0) (:jump))
-	(:case nil (:pushsc nil) (:jump))
-	(:case cons (:get -1) (:jump))]
-
-       rest
-       [1
-	(:enter 1)
-	(:eval (:get 0) (:jump))
-	(:case nil (:pushsc nil) (:jump))
-	(:case cons (:get -2) (:jump))]})
-       
-
-(def builtins
-     (->> '[[+ 2] [- 2] [* 2] [/ 2] [zero? 1] [nil? 1]]
-	  (map (fn [[op n]]
-		 {op
-		  `(~n
-		    (:enter ~n)
-		    ~@(map (fn [i] `(:eval (:get ~(- n 1 i)) (:mjump)))
-			   (range n))
-		    (:cljcall ~n ~op)
-		    (:ret-val))}))
-	  (apply merge low-prims)))
-
+(def stdlib
+     (let [interop
+	   (interop-compile
+	    '[[+ 2] [- 2] [* 2] [/ 2] [zero? 1]])
+	   stdfns
+	   (standalone-compile
+	    '((define if
+		[pred t f]
+		(case pred
+		      true [] t
+		      false [] f))
+	      (defstrict nil
+		[]
+		(%cons nil))
+	      (defstrict cons
+		[first rest]
+		(%cons cons first rest))
+	      (define first
+		[coll]
+		(case coll
+		      nil [] nil
+		      cons [x xs] x))
+	      (define rest
+		[coll]
+		(case coll
+		      nil [] nil
+		      cons [x xs] xs))
+	      (define nth
+		[coll n]
+		(case coll
+		      nil []
+		      nil
+		      
+		      cons [x xs]
+		      (if (zero? n) x (nth xs (- n 1)))))
+	      (define nil?
+		[coll]
+		(case coll
+		      nil [] true
+		      cons [x xs] false))))]
+       (apply merge interop stdfns)))
+	   
 (defn compile-program
   [prog]
-  (apply merge
-	 builtins
-	 (map compile-toplevel prog)))
+  (merge stdlib (standalone-compile prog)))
 
 (defn eval-program
   [prog]
@@ -295,10 +335,20 @@
      '((define integers
 	 [n]
 	 (cons n (integers (+ n 1))))
-       (define nth
-	 [coll n]
-	 (if (zero? n)
-	   (first coll)
-	   (nth (rest coll) (- n 1))))
        (define main [] (nth (integers 0) 5000))))
 
+(def samp4
+     '((define map2
+	 [f coll1 coll2]
+	 (case coll1
+	       nil []
+	       nil
+
+	       cons [x xs]
+	       (case coll2
+		     cons [y ys]
+		     (cons (f x y) (map2 f xs ys)))))
+       (define fibs
+	 []
+	 (cons 0 (cons 1 (map2 + fibs (rest fibs)))))
+       (define main [] (nth fibs 5000))))
