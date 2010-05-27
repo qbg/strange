@@ -48,7 +48,9 @@
 		    (let [[vs data] (split-at (count thunks) @*data-stack*)
 			  val (apply f (reverse vs))]
 		      (if (node? val)
-			val
+			(do
+			  (reset! *data-stack* data)
+			  val)
 			(let [data (conj data val)]
 			  (reset! *data-stack* data)
 			  (reset! (first @*work-stack*) val)
@@ -56,6 +58,20 @@
 			  (first @*work-stack*))))))
 	  (reset! *work-stack* (concat thunks @*work-stack*))
 	  (first thunks))))
+
+(defn make-case-node
+  [case-thunk switches]
+  (atom (fn []
+	  (reset! (first @*work-stack*)
+		  (fn []
+		    (let [[obj & data] @*data-stack*
+			  [tag & vals] obj]
+		      (reset! *data-stack* data)
+		      (cond
+		       (contains? switches tag) (apply (switches tag) vals)
+		       :else ((switches :default) obj)))))
+	  (swap! *work-stack* conj case-thunk)
+	  case-thunk)))
 
 (defn curry
   "Given f and n, the desired number of additional arguments to f, and some
@@ -122,6 +138,29 @@ arguments and then return a node"
 	~body)
       ~@(map #(compile-form env %) thunks))))
 
+(defn compile-case
+  [env form]
+  (let [[_ case & triples] form
+	triple (partition 3 triples)
+	maps (map (fn [[tag args body]]
+		    {`(quote ~tag)
+		     `(fn [~@args]
+			~(compile-form
+			  (assoc env
+			    :locals (into (:locals env) args))
+			  body))})
+		  triple)
+	switch (apply merge maps)]
+    `(make-case-node
+      ~(compile-form env case)
+      ~switch)))
+
+(defn compile-pcons
+  [env form]
+  (let [[_ tag & args] form]
+    `(make-return-node ['~tag
+			~@(map #(compile-form env %) args)])))
+
 (defn compile-form
   [env form]
   ((cond
@@ -130,6 +169,8 @@ arguments and then return a node"
     (not (seq? form)) compile-lit
     (= 'quote (first form)) compile-quote
     (= 'strict (first form)) compile-strict
+    (= 'case (first form)) compile-case
+    (= 'pcons (first form)) compile-pcons
     :else compile-app)
    env form))
 
@@ -184,7 +225,7 @@ arguments and then return a node"
 (defn merge-envs
   [env1 env2]
   {:args (merge (:args env1 {}) (:args env2 {}))
-   :locals (:locals env2 {})})
+   :locals (:locals env2 #{})})
 
 (defn compile-standalone
   [env program]
@@ -195,7 +236,9 @@ arguments and then return a node"
 (def stdlib
      (compile-standalone
       {}
-      '((defstrict + [x y] (strict [x x, y y] (+ x y)))
+      '((define nil (pcons nil))
+	(define cons [x xs] (pcons cons x xs))
+	(defstrict + [x y] (strict [x x, y y] (+ x y)))
 	(defstrict - [x y] (strict [x x, y y] (- x y)))
 	(defstrict * [x y] (strict [x x, y y] (* x y)))
 	(defstrict / [x y] (strict [x x, y y] (/ x y)))
@@ -230,3 +273,17 @@ arguments and then return a node"
 	   b
 	   (fibs-loop (- n 1) b (+ a b))))))
 
+(def samp3
+     '((define integers
+	 [n]
+	 (cons n (integers (+ n 1))))
+       (define nth
+	 [coll n]
+	 (case coll
+	       cons [x xs]
+	       (if (= n 0)
+		 x
+		 (nth xs (- n 1)))))
+       (define main (nth (integers 0) 5000))))
+
+	 
