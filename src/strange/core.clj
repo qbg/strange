@@ -1,354 +1,232 @@
 (ns strange.core)
 
-;;; Take a VM approach first, and build up layers on top of that
+(def *data-stack* (atom nil))
+(def *work-stack* (atom nil))
+(def *environment* (atom nil))
 
-(def instructions {})
+(defn eval-node
+  "Evaluate node, and any node it returns, and so on until nil is returned"
+  [node]
+  (reset! *data-stack* nil)
+  (reset! *work-stack* (list node))
+  (loop [node node]
+    (if node
+      (if (fn? @node)
+	(recur (@node))
+	;; We are returing a cached value
+	(do
+	  (swap! *data-stack* conj @node)
+	  (swap! *work-stack* next)
+	  (recur (first @*work-stack*))))
+      (first @*data-stack*))))
 
-(defmacro definstr
-  [name [& args] & body]
-  `(alter-var-root
-    #'instructions
-    assoc '~name
-    (fn [[~@args] ~'state]
-      ~@body)))
+(defmacro make-node
+  "Create a node that will evalute the body"
+  [body]
+  `(atom (fn [] ~body)))
 
-(defn do-enter
-  [state n]
-  (let [[vals data] (split-at n (:data state))
-	regs (zipmap (range n) vals)]
-    (assoc state
-      :data data
-      :regs regs)))
+(defn make-return-node
+  "Create a node that returns a value"
+  [val]
+  (atom (fn []
+	  (swap! *data-stack* conj val)
+	  (reset! (first @*work-stack*) val)
+	  (swap! *work-stack* next)
+	  (first @*work-stack*))))
 
-(definstr :get [n]
-  (assoc state :data (conj (:data state) ((:regs state) n))))
+(defn node?
+  "Return true if n is a node"
+  [n]
+  (instance? clojure.lang.Atom n))
 
-(defn create-closure
-  [code regs strict?]
-  (atom {:code code, :regs regs, :strict? strict?}))
+(defn make-clojure-node
+  "Create a node that executes a given closure"
+  [f & thunks]
+  (atom (fn []
+	  (reset! (first @*work-stack*)
+		  (fn []
+		    (let [[vs data] (split-at (count thunks) @*data-stack*)
+			  val (apply f (reverse vs))]
+		      (if (node? val)
+			val
+			(let [data (conj data val)]
+			  (reset! *data-stack* data)
+			  (reset! (first @*work-stack*) val)
+			  (swap! *work-stack* next)
+			  (first @*work-stack*))))))
+	  (reset! *work-stack* (concat thunks @*work-stack*))
+	  (first thunks))))
 
-(definstr :closure [& code]
-  (let [data (conj (:data state) (create-closure code (:regs state) false))]
-    (assoc state :data data)))
+(defn curry
+  "Given f and n, the desired number of additional arguments to f, and some
+number of given arguments, return a function that will accumulate the additional
+arguments and then return a node"
+  [f n & given-args]
+  (fn [& args]
+    (if (= (count args) n)
+      (atom #(apply f (concat given-args args)))
+      (apply curry f (- n (count args)) (concat given-args args)))))
 
-(defn cook
-  [state f]
-  (if (= (:arity f) (count (:args f)))
-    (create-closure `((:push ~@(:args f)) (:jumpg ~(:sc f))) nil (:strict? f))
-    f))
+(defn plain-curry
+  [f n]
+  (fn [& args]
+    (if (= (count args) n)
+      (atom #(apply f args))
+      (apply curry f (- n (count args)) args))))
 
-(defn strict-eval
-  [state]
-  (let [[f & data] (:data state)]
-    (if (and (instance? clojure.lang.Atom f) (map? @f))
-      (if (:strict? @f)
-	(let [code (concat '((:dup) (:eval) (:drop)) (:code state))]
-	  (assoc state :code code))
-	state)
-      state)))
-
-(definstr :pushsc [sym]
-  (if (contains? (:cache state) sym)
-    (assoc state :data (conj (:data state) ((:cache state) sym)))
-    (let [[arity strict?] (first ((:env state) sym))
-	  partial (cook state {:sc sym :arity arity :strict? strict?})
-	  data (conj (:data state) partial)
-	  cache (assoc (:cache state {}) sym partial)]
-      (strict-eval (assoc state :data data :cache cache)))))
-
-(definstr :curry [n]
-  (let [fun (first (:data state))
-	[args data] (split-at n (next (:data state)))
-	args (concat (:args fun) args)
-	res (cook state (assoc fun :args args))]
-    (strict-eval (assoc state :data (conj data res)))))
-
-(definstr :dup []
-  (let [[v & data] (:data state)]
-    (assoc state :data (conj data v v))))
-
-(definstr :drop []
-  (let [[v & data] (:data state)]
-    (assoc state :data data)))
-
-(defn do-jump
-  [state f]
-  (if (map? @f)
-    (let [code (:code @f)
-	  regs (:regs @f)]
-      (assoc state
-	:code code
-	:regs regs))
-    ((instructions :ret-val)
-     nil
-     (assoc state :data (conj (:data state) @f)))))
-
-(definstr :jump []
-  (let [[f & data] (:data state)]
-    (do-jump (assoc state :data data) f)))
-
-(definstr :jumpg [sym]
-  (let [[n & code] ((:env state) sym)]
-    (assoc (do-enter state (n 0))
-      :code code)))
-
-(definstr :update [closure]
-  (let [val (first (:data state))]
-    (reset! closure val)
-    state))
-
-(definstr :eval []
-  ;;; Evaluate the closure on the top of the state, updating it as needed
-  (let [[closure & data] (:data state)]
-    (if (map? @closure)
-      ;; push a continuation and jump to the closure
-      (let [cont (create-closure `((:update ~closure) ~@(:code state))
-				 (:regs state)
-				 false)
-	    cstack (conj (:cstack state) cont)]
-	(do-jump (assoc state :data data :cstack cstack) closure))
-      ;; unbox the cached value
-      (let [data (conj data @closure)]
-	(assoc state :data data)))))
-
-(definstr :case [tag base & code]
-  (let [[e & data] (:data state)]
-    (cond
-     (and (vector? e) (= (first e) tag))
-     (let [nregs (zipmap (iterate inc base) (rest e))
-	   regs (merge (:regs state) nregs)]
-       (assoc state
-	 :data data
-	 :code code
-	 :regs regs))
-
-     (or (= e tag) (= tag :default))
-     (let [regs (merge (:regs state) {base e})]
-       (assoc state
-	 :data data
-	 :code code
-	 :regs regs))
-
-     :else
-     state)))
-
-(definstr :push [& items]
-  (let [data (concat items (:data state))]
-    (assoc state :data data)))
-
-(definstr :push-lit [item]
-  (let [data (conj (:data state) (atom item))]
-    (assoc state :data data)))
-
-(definstr :ret-val []
-  ;; Pop a continuation and jump to it
-  (let [[cont & cstack] (:cstack state)]
-    (do-jump (assoc state :cstack cstack) cont)))
-
-(definstr :cljcall [n sym]
-  (let [[args data] (split-at n (:data state))
-	val (apply @(resolve sym) args)
-	data (conj data val)]
-    (assoc state :data data)))
-
-(definstr :pcons [type n]
-  (let [[vals data] (split-at n (:data state))
-	box (apply vector type vals)
-	data (conj data box)]
-    (assoc state :data data)))
-
-(defn run-program
-  [prog]
-  (let [init {:code (concat (next (prog 'main))) :regs {} :env prog}]
-    (loop [state init]
-      (if (seq (:code state))
-	(recur ((instructions (first (first (:code state))))
-		(rest (first (:code state)))
-		(assoc state :code (next (:code state)))))
-	(first (:data state))))))
-
-;;;; Compiler
+(defn env-value
+  "Return a value from the global environment"
+  [sym]
+  (@*environment* sym))
 
 (declare compile-form)
 
 (defn compile-lit
   [env lit]
-  `((:push-lit ~lit)))
+  `(make-return-node '~lit))
+
+(defn local-var?
+  [env sym]
+  (contains? (:locals env) sym))
 
 (defn compile-symbol
   [env sym]
-  (if (contains? env sym)
-    `((:get ~(env sym)))
-    `((:pushsc ~sym))))
-
-(defn compile-app
-  [env form]
-  `(~@(mapcat #(compile-form env %)
-	      (reverse form))
-    (:curry ~(count (next form)))))
+  (if (local-var? env sym)
+    sym
+    (let [n ((:args env {}) sym)]
+      (if (= n 0)
+	`(env-value '~sym)
+	`(plain-curry (env-value '~sym) ~n)))))
 
 (defn compile-quote
   [env form]
   (compile-lit env (second form)))
 
-(defn compile-case
+(defn compile-app
   [env form]
-  (let [[_ d & forms] form]
-    `((:closure
-       ~@(compile-form env d)
-       (:eval)
-       ~@(map (fn [[tag bindings body]]
-		(let [base (count env)
-		      nenv (zipmap bindings (iterate inc base))
-		      env (merge env nenv)]
-		  `(:case ~tag ~base ~@(compile-form env body) (:jump))))
-	      (partition 3 forms))))))
+  (let [body
+	(if (= ((:args env {}) (first form)) (count (rest form)))
+	  `(make-node ((env-value '~(first form))
+		       ~@(map #(compile-form env %) (rest form))))
+	  (map #(compile-form env %) form))]
+    body))
 
-(defn compile-pcons
+(defn compile-strict
   [env form]
-  (let [[_ type & vals] form]
-    `((:closure
-       ~@(mapcat (fn [f] (compile-form env f)) (reverse vals))
-       (:pcons ~type ~(count vals))
-       (:ret-val)))))
-  
+  (let [[_ bindings body] form
+	vt-pairs (partition 2 bindings)
+	vars (map first vt-pairs)
+	thunks (map second vt-pairs)]
+    `(make-clojure-node
+      (fn [~@vars]
+	~body)
+      ~@(map #(compile-form env %) thunks))))
+
 (defn compile-form
   [env form]
   ((cond
     (symbol? form) compile-symbol
     (nil? form) compile-symbol
-    (not (list? form)) compile-lit
+    (not (seq? form)) compile-lit
     (= 'quote (first form)) compile-quote
-    (= 'case (first form)) compile-case
-    (= '%cons (first form)) compile-pcons
+    (= 'strict (first form)) compile-strict
     :else compile-app)
    env form))
 
-(defn args->env
-  [args]
-  (zipmap args (range)))
-
 (defn compile-define
-  [form]
-  (let [[_ name args body] form]
-    {name `([~(count args) false]
-	    ~@(compile-form (args->env args) body)
-	    ~(if (= name 'main) '(:eval) '(:jump)))}))
+  [env form]
+  (if (vector? (nth form 2))
+    (let [[_ name [& args] body] form]
+      {name
+       (eval `(fn [~@args]
+		~(compile-form
+		  (assoc env :locals (set args))
+		  body)))})
+    (let [[_ name body] form]
+      {name
+       (eval `(make-node ~(compile-form env body)))})))
 
 (defn compile-defstrict
-  [form]
-  (let [[_ name args body] form]
-    {name `([~(count args) true]
-	    ~@(compile-form (args->env args) body)
-	    (:jump))}))
+  [env form]
+  (let [[_ name [& args] body] form]
+    {name
+     (eval `(fn [~@args]
+	      ~(compile-form
+		(assoc env :locals (set args))
+		body)))}))
 
 (defn compile-toplevel
-  [form]
+  [env form]
   ((cond
     (= 'define (first form)) compile-define
     (= 'defstrict (first form)) compile-defstrict
     :else (constantly {}))
-   form))
+   env form))
 
-(defn standalone-compile
+(defn gather-global-env
   [program]
-  (apply merge (map compile-toplevel program)))
+  (let [proc (fn [env form]
+	       (cond
+		(= 'define (first form))
+		(assoc env
+		  :args (assoc (:args env)
+			  (nth form 1)
+			  (if (vector? (nth form 2))
+			    (count (nth form 2))
+			    0)))
 
-(defn interop-compile
-  [forms]
-  (apply merge
-	 (map (fn [[op n]]
-		{op
-		 `([~n true]
-		   ~@(mapcat (fn [i] `((:get ~(- n 1 i)) (:eval)))
-			     (range n))
-		   (:cljcall ~n ~op)
-		   (:ret-val))})
-	      forms)))
+		(= 'defstrict (first form))
+		(assoc env
+		  :args (assoc (:args env {}) (nth form 1) (count (nth form 2)))
+		  :strict (conj (:strict env #{}) (nth form 1)))))]
+    (reduce proc {} program)))
+
+(defn merge-envs
+  [env1 env2]
+  {:args (merge (:args env1 {}) (:args env2 {}))
+   :locals (:locals env2 {})})
+
+(defn compile-standalone
+  [env program]
+  (let [env (merge-envs env (gather-global-env program))]
+    [(apply merge (map #(compile-toplevel env %) program))
+     env]))
 
 (def stdlib
-     (let [interop
-	   (interop-compile
-	    '[[+ 2] [- 2] [* 2] [/ 2] [zero? 1]])
-	   stdfns
-	   (standalone-compile
-	    '((define if
-		[pred t f]
-		(case pred
-		      true [] t
-		      false [] f))
-	      (defstrict nil
-		[]
-		(%cons nil))
-	      (defstrict cons
-		[first rest]
-		(%cons cons first rest))
-	      (define first
-		[coll]
-		(case coll
-		      nil [] nil
-		      cons [x xs] x))
-	      (define rest
-		[coll]
-		(case coll
-		      nil [] nil
-		      cons [x xs] xs))
-	      (define nth
-		[coll n]
-		(case coll
-		      nil []
-		      nil
-		      
-		      cons [x xs]
-		      (if (zero? n) x (nth xs (- n 1)))))
-	      (define nil?
-		[coll]
-		(case coll
-		      nil [] true
-		      cons [x xs] false))))]
-       (apply merge interop stdfns)))
-	   
+     (compile-standalone
+      {}
+      '((defstrict + [x y] (strict [x x, y y] (+ x y)))
+	(defstrict - [x y] (strict [x x, y y] (- x y)))
+	(defstrict * [x y] (strict [x x, y y] (* x y)))
+	(defstrict / [x y] (strict [x x, y y] (/ x y)))
+	(define if [pred t f] (strict [pred pred] (if pred t f)))
+	(defstrict = [x y] (strict [x x, y y] (= x y))))))
+
 (defn compile-program
-  [prog]
-  (merge stdlib (standalone-compile prog)))
+  [program]
+  (merge (first stdlib)
+	 (first (compile-standalone (second stdlib) program))))
+
+(defn run-program
+  [cprogram]
+  (reset! *environment* cprogram)
+  (let [main (cprogram 'main)]
+    (eval-node main)))
 
 (defn eval-program
-  [prog]
-  (run-program (compile-program prog)))
+  [program]
+  (run-program (compile-program program)))
 
 (def samp
-     '((define main [] (square (+ 1 2)))
+     '((define main (square (+ 1 2)))
        (define square [n] (* n n))))
 
 (def samp2
-     '((define fib-loop
+     '((define main (fibs 5000))
+       (define fibs [n] (fibs-loop n 1 0))
+       (define fibs-loop
 	 [n a b]
-	 (if (zero? n)
+	 (if (= 0 n)
 	   b
-	   (fib-loop (- n 1) b (+ a b))))
-       (define fib
-	 [n]
-	 (fib-loop n 1 0))
-       (define main [] (fib 5000))))
+	   (fibs-loop (- n 1) b (+ a b))))))
 
-(def samp3
-     '((define integers
-	 [n]
-	 (cons n (integers (+ n 1))))
-       (define main [] (nth (integers 0) 5000))))
-
-(def samp4
-     '((define map2
-	 [f coll1 coll2]
-	 (case coll1
-	       nil []
-	       nil
-
-	       cons [x xs]
-	       (case coll2
-		     cons [y ys]
-		     (cons (f x y) (map2 f xs ys)))))
-       (define fibs
-	 []
-	 (cons 0 (cons 1 (map2 + fibs (rest fibs)))))
-       (define main [] (nth fibs 5000))))
