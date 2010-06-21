@@ -185,6 +185,11 @@
    (= 'defn (first form)) (eval-defn form)
    :else (force-thunk (s-eval form {}))))
 
+(defn print-defs
+  "Print out a list of all of the loaded definitions"
+  []
+  (println (sort (keys @environment))))
+
 (def stdlib
      '((defn + [x y] (prim + x y))
        (defn - [x y] (prim - x y))
@@ -192,8 +197,14 @@
        (defn / [x y] (prim / x y))
        (defn = [x y] (prim = x y))
        (defn eval [code] (prim strange.core/toplevel-eval code))
+       (defn defs [] (prim strange.core/print-defs))
        (defn cons [x xs] (adt :cons x xs))
        (def nil (adt :nil))
+       (defn nil?
+	 [xs]
+	 (case xs
+	       [:cons x y] false
+	       [:nil] true))
        (defn first
 	 [xs]
 	 (case xs
@@ -207,14 +218,19 @@
        (defn map
 	 [f xs]
 	 (case xs
-	       [:cons x xs] (cons (f x) (map f xs))
+	       [:cons x xs]
+	       (let [x (strict x)]
+		 (cons (f x) (map f xs)))
 	       [:nil] nil))
        (defn map2
 	 [f xs ys]
 	 (case xs
 	       [:cons x xs]
 	       (case ys
-		     [:cons y ys] (cons (f x y) (map2 f xs ys))
+		     [:cons y ys]
+		     (let [x (strict x)
+			   y (strict y)]
+		       (cons (f x y) (map2 f xs ys)))
 		     [:nil] nil)
 	       [:nil] nil))
        (defn nth
@@ -244,13 +260,19 @@
 	       [:nil] ys))
        (defn cycle
 	 [xs]
-	 (letrec [ys (append xs ys)]
-		 ys))
+	 (letrec [ys (append xs ys)] ys))
        (defn foldl
 	 [f init xs]
 	 (case xs
 	       [:cons x xs]
 	       (foldl f (strict (f init x)) xs)
+	       [:nil]
+	       init))
+       (defn foldr
+	 [f init xs]
+	 (case xs
+	       [:cons x xs]
+	       (f x (foldr f init xs))
 	       [:nil]
 	       init))))
 
