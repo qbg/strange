@@ -30,9 +30,9 @@
 	env (merge env (zipmap vars vals))]
     (s-eval body env)))
 
-(defn unify
+(defn pattern-match
   ([pattern value]
-     (unify pattern value {}))
+     (pattern-match pattern value {}))
   ([pattern value asserts]
      (cond
       (nil? asserts) nil
@@ -47,7 +47,7 @@
       (if (and (sequential? value) (= (count pattern) (count value)))
 	(if (seq pattern)
 	  (recur (next pattern) (next value)
-		 (unify (first pattern) (first value) asserts))
+		 (pattern-match (first pattern) (first value) asserts))
 	  asserts))
 
       :else
@@ -59,8 +59,13 @@
   (let [[_ val & cases] form
 	val (force-thunk (s-eval val env))
 	cases (partition 2 cases)
-	match (first (filter #(unify (first %) val) cases))
-	env (merge env (unify (first match) val))]
+	match (->>
+		 cases
+		 (map (fn [[pattern body]]
+			[(pattern-match pattern val) body]))
+		 (filter #(identity (first %)))
+		 first)
+	env (merge env (first match))]
     (s-eval (second match) env)))
 
 (defn eval-fn
@@ -137,18 +142,10 @@
    (= 'defn (first form)) (eval-defn form)
    :else (force-thunk (s-eval form {}))))
 
-(defn eval-program
-  [program]
-  (reset! environment {})
-  (loop [program program, val nil]
-    (if (seq program)
-      (recur (next program) (toplevel-eval (first program)))
-      val)))
-
-(def samp
-     '((defn + [x y] (prim +' x y))
-       (defn - [x y] (prim -' x y))
-       (defn * [x y] (prim *' x y))
+(def stdlib
+     '((defn + [x y] (prim + x y))
+       (defn - [x y] (prim - x y))
+       (defn * [x y] (prim * x y))
        (defn / [x y] (prim / x y))
        (defn = [x y] (prim = x y))
        (defn cons [x xs] (adt :cons x xs))
@@ -171,19 +168,90 @@
        (defn map2
 	 [f xs ys]
 	 (case xs
-	       [:cons x xs] (cons (f x (strict (first ys)))
-				  (map2 f xs (strict (rest ys))))))
+	       [:cons x xs]
+	       (case ys
+		     [:cons y ys] (cons (f x y) (map2 f xs ys))
+		     [:nil] nil)
+	       [:nil] nil))
        (defn nth
 	 [xs n]
-	 (if (= n 0)
-	   (strict (first xs))
-	   (nth (strict (rest xs)) (strict (- n 1)))))
+	 (case xs
+	       [:cons x xs]
+	       (if (= n 0)
+		 x
+		 (nth xs (strict (- n 1))))
+	       [:nil]
+	       nil))
        (defn iterate
 	 [f val]
 	 (cons val (iterate f (strict (f val)))))
        (def integers (iterate (+ 1) 0))
-       
-       (defn square [x] (* x x))
+       (defn take
+	 [n xs]
+	 (if (= n 0)
+	   nil
+	   (case xs
+		 [:cons x xs] (cons x (take (strict (- n 1)) xs))
+		 [:nil] nil)))))
+
+(defn eval-program
+  [program]
+  (reset! environment {})
+  (loop [program (concat stdlib program), val nil]
+    (if (seq program)
+      (recur (next program) (toplevel-eval (first program)))
+      val)))
+
+(declare print-val)
+
+(defn print-rest
+  [val]
+  (cond
+   (= :nil (first val)) (print ")")
+   :else
+   (let [[_ f r] val
+	 f (force-thunk f)
+	 r (force-thunk r)]
+     (print " ")
+     (print-val f)
+     (recur r))))
+
+(defn print-list
+  [val]
+  (cond
+   (= :nil (first val)) (print "()")
+   (= :cons (first val))
+   (let [[_ f r] val
+	 f (force-thunk f)
+	 r (force-thunk r)]
+     (print "(")
+     (print-val f)
+     (print-rest r))))
+
+(defn print-val
+  [val]
+  (let [val (force-thunk val)]
+    (cond
+     (not (vector? val)) (print val)
+     (= :nil (first val)) (print ())
+     (= :cons (first val)) (print-list val)
+     :else (print (format "#<ADT %s>" (first val))))))
+
+(defn repl
+  []
+  (eval-program nil)
+  (loop []
+    (print "> ")
+    (.flush *out*)
+    (let [form (read)]
+      (when (not (= form :quit))
+	(print-val (toplevel-eval form))
+	(println)
+	(println)
+	(recur)))))
+
+(def samp
+     '((defn square [x] (* x x))
        (def prog-1 (square (+ 1 2)))
 
        (defn fib-loop
@@ -197,5 +265,6 @@
 
        (def fibs (cons 0 (cons 1 (map2 + fibs (rest fibs)))))
        (def fibs-2 (map fib integers))
+       (def doubles (map2 + integers integers))
 
-       (nth fibs-2 5000)))
+       (nth doubles 5)))
