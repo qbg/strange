@@ -2,7 +2,7 @@
 
 (def *data-stack* (atom nil))
 (def *work-stack* (atom nil))
-(def *environment* (atom nil))
+(def *environment* (atom {}))
 
 (defn eval-node
   "Evaluate node, and any node it returns, and so on until nil is returned"
@@ -65,6 +65,7 @@
 	  (reset! (first @*work-stack*)
 		  (fn []
 		    (let [[obj & data] @*data-stack*
+			  obj (if (vector? obj) obj [obj])
 			  [tag & vals] obj]
 		      (reset! *data-stack* data)
 		      (cond
@@ -140,16 +141,16 @@ arguments and then return a node"
 
 (defn compile-case
   [env form]
-  (let [[_ case & triples] form
-	triple (partition 3 triples)
-	maps (map (fn [[tag args body]]
+  (let [[_ case & pairs] form
+	pairs (partition 2 pairs)
+	maps (map (fn [[[tag & args] body]]
 		    {`(quote ~tag)
 		     `(fn [~@args]
 			~(compile-form
 			  (assoc env
 			    :locals (into (:locals env) args))
 			  body))})
-		  triple)
+		  pairs)
 	switch (apply merge maps)]
     `(make-case-node
       ~(compile-form env case)
@@ -176,51 +177,40 @@ arguments and then return a node"
 
 (defn compile-define
   [env form]
-  (if (vector? (nth form 2))
-    (let [[_ name [& args] body] form]
-      {name
-       (eval `(fn [~@args]
-		~(compile-form
-		  (assoc env :locals (set args))
-		  body)))})
-    (let [[_ name body] form]
-      {name
-       (eval `(make-node ~(compile-form env body)))})))
-
-(defn compile-defstrict
-  [env form]
-  (let [[_ name [& args] body] form]
-    {name
-     (eval `(fn [~@args]
-	      ~(compile-form
-		(assoc env :locals (set args))
-		body)))}))
+  (let [name (second form)
+	comp
+	(if (vector? (nth form 2))
+	  (let [[_ _ [& args] body] form]
+	    `(fn [~@args]
+	       ~(compile-form
+		 (assoc env :locals (set args))
+		 body)))
+	  (let [[_ _ body] form]
+	    (compile-form env body)))]
+    {name (eval comp)}))
 
 (defn compile-toplevel
   [env form]
   ((cond
     (= 'define (first form)) compile-define
-    (= 'defstrict (first form)) compile-defstrict
     :else (constantly {}))
+   env form))
+
+(defn gather-define
+  [env form]
+  (let [args (if (vector? (nth form 2)) (count (nth form 2)) 0)]
+    (update-in env [:args] assoc (nth form 1) args)))
+
+(defn gather-form
+  [env form]
+  ((cond
+    (= 'define (first form)) gather-define
+    :else (constantly env))
    env form))
 
 (defn gather-global-env
   [program]
-  (let [proc (fn [env form]
-	       (cond
-		(= 'define (first form))
-		(assoc env
-		  :args (assoc (:args env)
-			  (nth form 1)
-			  (if (vector? (nth form 2))
-			    (count (nth form 2))
-			    0)))
-
-		(= 'defstrict (first form))
-		(assoc env
-		  :args (assoc (:args env {}) (nth form 1) (count (nth form 2)))
-		  :strict (conj (:strict env #{}) (nth form 1)))))]
-    (reduce proc {} program)))
+  (reduce gather-form {} program))
 
 (defn merge-envs
   [env1 env2]
@@ -238,12 +228,28 @@ arguments and then return a node"
       {}
       '((define nil (pcons nil))
 	(define cons [x xs] (pcons cons x xs))
-	(defstrict + [x y] (strict [x x, y y] (+ x y)))
-	(defstrict - [x y] (strict [x x, y y] (- x y)))
-	(defstrict * [x y] (strict [x x, y y] (* x y)))
-	(defstrict / [x y] (strict [x x, y y] (/ x y)))
+	(define + [x y] (strict [x x, y y] (+ x y)))
+	(define - [x y] (strict [x x, y y] (- x y)))
+	(define * [x y] (strict [x x, y y] (* x y)))
+	(define / [x y] (strict [x x, y y] (/ x y)))
 	(define if [pred t f] (strict [pred pred] (if pred t f)))
-	(defstrict = [x y] (strict [x x, y y] (= x y))))))
+	(define = [x y] (strict [x x, y y] (= x y)))
+	(define nth
+	 [coll n]
+	 (case coll
+	       [nil]
+	       nil
+	       
+	       [cons x xs]
+	       (if (= n 0)
+		 x
+		 (nth xs (- n 1)))))
+	(define first
+	  [coll]
+	  (case coll [nil] nil [cons x xs] x))
+	(define rest
+	  [coll]
+	  (case coll [nil] nil [cons x xs] xs)))))	
 
 (defn compile-program
   [program]
@@ -277,13 +283,37 @@ arguments and then return a node"
      '((define integers
 	 [n]
 	 (cons n (integers (+ n 1))))
-       (define nth
-	 [coll n]
-	 (case coll
-	       cons [x xs]
-	       (if (= n 0)
-		 x
-		 (nth xs (- n 1)))))
        (define main (nth (integers 0) 5000))))
 
-	 
+(def samp4
+     '((define map2
+	 [f coll1 coll2]
+	 (case coll1
+	       [cons x xs]
+	       (case coll2
+		     [cons y ys]
+		     (cons (f x y) (map2 f xs ys)))))
+       (define fibs
+	 (cons 0 (cons 1 (map2 + fibs (rest fibs)))))
+       (define main (nth fibs 5000))))
+
+(def samp5
+     '((define integers
+	 [n]
+	 (cons n (integers (+ n 1))))
+       (define map
+	 [f coll]
+	 (case coll
+	       [nil]
+	       nil
+
+	       [cons x xs]
+	       (cons (f x) (map f xs))))
+       (define fib-loop
+	 [a b n]
+	 (if (= n 0)
+	   b
+	   (fib-loop b (+ a b) (- n 1))))
+       (define fibs
+	 (map (fib-loop 1 0) (integers 0)))
+       (define main (nth fibs 5000))))
