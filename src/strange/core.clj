@@ -3,30 +3,30 @@
 (def environment (atom {}))
 (declare s-eval)
 
-(defn force-thunk
+(defn- force-thunk
   [thunk]
   (if (delay? thunk)
     (recur @thunk)
     thunk))
 
-(defn eval-symbol
+(defn- eval-symbol
   [form env]
   (env form (@environment form)))
 
-(defn convert-seq
+(defn- convert-seq
   [coll]
   (if (seq coll)
     [:cons (first coll) (delay (convert-seq (rest coll)))]
     [:nil]))
 
-(defn eval-quote
+(defn- eval-quote
   [form env]
   (let [form (second form)]
     (if (sequential? form)
       (convert-seq form)
       form)))
 
-(defn eval-if
+(defn- eval-if
   [form env]
   (let [[_ pred t f] form]
     (delay
@@ -34,7 +34,7 @@
        (s-eval t env)
        (s-eval f env)))))
 
-(defn eval-let
+(defn- eval-let
   [form env]
   (let [[_ bindings body] form
 	bindings (partition 2 bindings)
@@ -43,7 +43,7 @@
 	env (merge env (zipmap vars vals))]
     (s-eval body env)))
 
-(defn eval-letrec
+(defn- eval-letrec
   [form env]
   (let [[_ bindings body] form
 	bindings (partition 2 bindings)
@@ -54,7 +54,7 @@
     (reset! new-env (zipmap vars vals))
     (s-eval body env)))
 
-(defn pattern-match
+(defn- pattern-match
   ([pattern value]
      (pattern-match pattern value {}))
   ([pattern value asserts]
@@ -78,7 +78,7 @@
       (if (= pattern value)
 	asserts))))
      
-(defn eval-case
+(defn- eval-case
   [form env]
   (let [[_ val & cases] form
 	val (force-thunk (s-eval val env))
@@ -90,14 +90,19 @@
 		 (filter #(identity (first %)))
 		 first)
 	env (merge env (first match))]
-    (s-eval (second match) env)))
+    (if match
+      (s-eval (second match) env)
+      (throw (Exception.
+	      (format "Failed to match value of type %s when executing %s"
+		      (if (vector? val) (first val) val)
+		      form))))))
 
-(defn eval-fn
+(defn- eval-fn
   [form env]
   (let [[_ args body] form]
     {:env env :args args :body body}))
 
-(defn externalize
+(defn- externalize
   [val]
   (cond
    (not (sequential? val)) val
@@ -109,23 +114,23 @@
      (lazy-seq
       (cons f (externalize r))))))
 
-(defn eval-prim
+(defn- eval-prim
   [form env]
   (let [[_ f & args] form
 	args (map #(externalize (force-thunk (s-eval % env))) args)]
     (apply (resolve f) args)))
 
-(defn eval-strict
+(defn- eval-strict
   [form env]
   (force-thunk (s-eval (second form) env)))
 
-(defn partial-apply
+(defn- partial-apply
   [f vals]
   (let [[vars args] (split-at (count vals) (:args f))
 	env (merge (:env f) (zipmap vars vals))]
     (assoc f :args args :env env)))
 
-(defn eval-app
+(defn- eval-app
   [form env]
   (delay
    (let [[f & args] form
@@ -136,13 +141,13 @@
 	 (s-eval (:body f) env))
        (partial-apply f args)))))
 
-(defn eval-adt
+(defn- eval-adt
   [form env]
   (let [[_ type & args] form
 	args (map #(s-eval % env) args)]
     (apply vector type args)))
 
-(defn s-eval
+(defn- s-eval
   [form env]
   (cond
    (nil? form) (eval-symbol form env)
@@ -159,19 +164,20 @@
    (= 'adt (first form)) (eval-adt form env)
    :else (eval-app form env)))
 
-(defn eval-def
+(defn- eval-def
   [form]
   (let [[_ name body] form]
     (swap! environment assoc name (s-eval body {}))
     name))
 
-(defn eval-defn
+(defn- eval-defn
   [form]
   (let [[_ name args body] form]
     (swap! environment assoc name {:env {} :args args :body body})
     name))
 
 (defn toplevel-eval
+  "Given a form, evaluate it and return its value"
   [form]
   (cond
    (not (sequential? form)) (force-thunk (s-eval form {}))
@@ -239,9 +245,17 @@
        (defn cycle
 	 [xs]
 	 (letrec [ys (append xs ys)]
-		 ys))))
+		 ys))
+       (defn foldl
+	 [f init xs]
+	 (case xs
+	       [:cons x xs]
+	       (foldl f (strict (f init x)) xs)
+	       [:nil]
+	       init))))
 
 (defn eval-program
+  "Evaluate a program and return its last value in a new enviornment"
   [program]
   (reset! environment {})
   (loop [program (concat stdlib program), val nil]
@@ -251,7 +265,7 @@
 
 (declare print-val)
 
-(defn print-rest
+(defn- print-rest
   [val]
   (cond
    (= :nil (first val)) (print ")")
@@ -263,7 +277,7 @@
      (print-val f)
      (recur r))))
 
-(defn print-list
+(defn- print-list
   [val]
   (cond
    (= :nil (first val)) (print "()")
@@ -276,6 +290,7 @@
      (print-rest r))))
 
 (defn print-val
+  "Print a returned value"
   [val]
   (let [val (force-thunk val)]
     (cond
@@ -284,17 +299,24 @@
      (= :cons (first val)) (print-list val)
      :else (print (format "#<ADT %s>" (first val))))))
 
+(defn- safe-read
+  []
+  (try
+    (read)
+    (catch Exception e (do (println (str e)) nil))))
+
 (defn repl
+  "Launch a repl"
   []
   (eval-program nil)
   (loop []
     (print "> ")
     (.flush *out*)
-    (let [form (read)]
-      (when (not (= form :quit))
-	(print-val (toplevel-eval form))
-	(println)
+    (let [form (safe-read)]
+      (when (not (= form :quit)) 
+	(try
+	  (print-val (toplevel-eval form))
+	  (println)
+	  (catch Exception e (println (str e))))
 	(println)
 	(recur)))))
-
-
