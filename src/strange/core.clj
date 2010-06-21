@@ -13,6 +13,19 @@
   [form env]
   (env form (@environment form)))
 
+(defn convert-seq
+  [coll]
+  (if (seq coll)
+    [:cons (first coll) (delay (convert-seq (rest coll)))]
+    [:nil]))
+
+(defn eval-quote
+  [form env]
+  (let [form (second form)]
+    (if (sequential? form)
+      (convert-seq form)
+      form)))
+
 (defn eval-if
   [form env]
   (let [[_ pred t f] form]
@@ -28,6 +41,17 @@
 	vars (map first bindings)
 	vals (map #(s-eval (second %) env) bindings)
 	env (merge env (zipmap vars vals))]
+    (s-eval body env)))
+
+(defn eval-letrec
+  [form env]
+  (let [[_ bindings body] form
+	bindings (partition 2 bindings)
+	vars (map first bindings)
+	new-env (atom {})
+	env (merge env (zipmap vars (map #(delay (@new-env %)) vars)))
+	vals (map #(s-eval (second %) env) bindings)]
+    (reset! new-env (zipmap vars vals))
     (s-eval body env)))
 
 (defn pattern-match
@@ -112,9 +136,10 @@
    (nil? form) (eval-symbol form env)
    (symbol? form) (eval-symbol form env)
    (not (sequential? form)) form
-   (= 'quote (first form)) (second form)
+   (= 'quote (first form)) (eval-quote form env)
    (= 'if (first form)) (eval-if form env)
    (= 'let (first form)) (eval-let form env)
+   (= 'letrec (first form)) (eval-letrec form env)
    (= 'case (first form)) (eval-case form env)
    (= 'fn (first form)) (eval-fn form env)
    (= 'strict (first form)) (eval-strict form env)
@@ -192,7 +217,16 @@
 	   nil
 	   (case xs
 		 [:cons x xs] (cons x (take (strict (- n 1)) xs))
-		 [:nil] nil)))))
+		 [:nil] nil)))
+       (defn append
+	 [xs ys]
+	 (case xs
+	       [:cons x xs] (cons x (append xs ys))
+	       [:nil] ys))
+       (defn cycle
+	 [xs]
+	 (letrec [ys (append xs ys)]
+		 ys))))
 
 (defn eval-program
   [program]
@@ -250,21 +284,4 @@
 	(println)
 	(recur)))))
 
-(def samp
-     '((defn square [x] (* x x))
-       (def prog-1 (square (+ 1 2)))
 
-       (defn fib-loop
-	 [n a b]
-	 (if (= n 0)
-	   b
-	   (fib-loop (strict (- n 1))
-		     b
-		     (strict (+ a b)))))
-       (defn fib [n] (fib-loop n 1 0))
-
-       (def fibs (cons 0 (cons 1 (map2 + fibs (rest fibs)))))
-       (def fibs-2 (map fib integers))
-       (def doubles (map2 + integers integers))
-
-       (nth doubles 5)))
