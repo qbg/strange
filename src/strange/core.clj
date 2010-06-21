@@ -97,10 +97,22 @@
   (let [[_ args body] form]
     {:env env :args args :body body}))
 
+(defn externalize
+  [val]
+  (cond
+   (not (sequential? val)) val
+   (= :nil (first val)) nil
+   (= :cons (first val))
+   (let [[_ f r] val
+	 f (externalize (force-thunk f))
+	 r (force-thunk r)]
+     (lazy-seq
+      (cons f (externalize r))))))
+
 (defn eval-prim
   [form env]
   (let [[_ f & args] form
-	args (map #(force-thunk (s-eval % env)) args)]
+	args (map #(externalize (force-thunk (s-eval % env))) args)]
     (apply (resolve f) args)))
 
 (defn eval-strict
@@ -173,6 +185,7 @@
        (defn * [x y] (prim * x y))
        (defn / [x y] (prim / x y))
        (defn = [x y] (prim = x y))
+       (defn eval [code] (prim strange.core/toplevel-eval code))
        (defn cons [x xs] (adt :cons x xs))
        (def nil (adt :nil))
        (defn first
