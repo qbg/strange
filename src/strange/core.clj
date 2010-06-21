@@ -9,9 +9,16 @@
     (recur @thunk)
     thunk))
 
-(defn- eval-symbol
-  [form env]
-  (env form (@environment form)))
+(let [no-val (gensym)]
+  (defn- eval-symbol
+    [form env]
+    (let [val (env form no-val)]
+      (if (= val no-val)
+	(let [val (@environment form no-val)]
+	  (if (= val no-val)
+	    (throw (Exception. (format "%s is undefined" form)))
+	    val))
+	val))))
 
 (defn- convert-seq
   [coll]
@@ -100,7 +107,7 @@
 (defn- eval-fn
   [form env]
   (let [[_ args body] form]
-    {:env env :args args :body body}))
+    [:fn :anonymous env args body]))
 
 (defn- externalize
   [val]
@@ -126,9 +133,9 @@
 
 (defn- partial-apply
   [f vals]
-  (let [[vars args] (split-at (count vals) (:args f))
-	env (merge (:env f) (zipmap vars vals))]
-    (assoc f :args args :env env)))
+  (let [[vars args] (split-at (count vals) (f 3))
+	env (merge (f 2) (zipmap vars vals))]
+    [:fn (f 1) env args (f 4)]))
 
 (defn- eval-app
   [form env]
@@ -136,9 +143,13 @@
    (let [[f & args] form
 	 f (force-thunk (s-eval f env))
 	 args (map #(s-eval % env) args)]
-     (if (= (count (:args f)) (count args))
-       (let [env (merge (:env f) (zipmap (:args f) args))]
-	 (s-eval (:body f) env))
+     (if (or (not (vector? f)) (not= (f 0) :fn))
+       (throw (Exception.
+	       (format "Tried to call a non-function when executing %s"
+		       form))))
+     (if (= (count (f 3)) (count args))
+       (let [env (merge (f 2) (zipmap (f 3) args))]
+	 (s-eval (f 4) env))
        (partial-apply f args)))))
 
 (defn- eval-adt
@@ -173,7 +184,7 @@
 (defn- eval-defn
   [form]
   (let [[_ name args body] form]
-    (swap! environment assoc name {:env {} :args args :body body})
+    (swap! environment assoc name [:fn name {} args body])
     name))
 
 (defn toplevel-eval
@@ -301,15 +312,17 @@
 
 (defn- print-list
   [val]
-  (cond
-   (= :nil (first val)) (print "()")
-   (= :cons (first val))
-   (let [[_ f r] val
-	 f (force-thunk f)
-	 r (force-thunk r)]
-     (print "(")
-     (print-val f)
-     (print-rest r))))
+  (let [[_ f r] val
+	f (force-thunk f)
+	r (force-thunk r)]
+    (print "(")
+    (print-val f)
+    (print-rest r)))
+
+(defn- print-fn
+  [val]
+  (let [[_ name env args body] val]
+    (print (format "#<Function %s %s>" name (apply vector args)))))
 
 (defn print-val
   "Print a returned value"
@@ -317,9 +330,10 @@
   (let [val (force-thunk val)]
     (cond
      (not (vector? val)) (print val)
-     (= :nil (first val)) (print ())
+     (= :nil (first val)) (print nil)
      (= :cons (first val)) (print-list val)
-     :else (print (format "#<ADT %s>" (first val))))))
+     (= :fn (first val)) (print-fn val)
+     :else (print (format "#<%s>" (first val))))))
 
 (defn- safe-read
   []

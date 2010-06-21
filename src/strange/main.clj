@@ -4,7 +4,7 @@
 
 (defn -main
   []
-  (println "Strange v0.0.1-alpha REPL")
+  (println "Strange 0.0.1-alpha")
   (println "Enter :quit to quit")
   (core/repl)
   (System/exit 0))
