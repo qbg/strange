@@ -202,39 +202,39 @@
   (println (sort (keys @environment))))
 
 (def stdlib
-     '((defn + [x y] (prim + x y))
-       (defn - [x y] (prim - x y))
-       (defn * [x y] (prim * x y))
-       (defn / [x y] (prim / x y))
-       (defn = [x y] (prim = x y))
-       (defn eval [code] (prim strange.core/toplevel-eval code))
-       (defn defs [] (prim strange.core/print-defs))
-       (defn cons [x xs] (adt :cons x xs))
+     '((defn + (x y) (prim + x y))
+       (defn - (x y) (prim - x y))
+       (defn * (x y) (prim * x y))
+       (defn / (x y) (prim / x y))
+       (defn = (x y) (prim = x y))
+       (defn eval (code) (prim strange.core/toplevel-eval code))
+       (defn defs () (prim strange.core/print-defs))
+       (defn cons (x xs) (adt :cons x xs))
        (def nil (adt :nil))
        (defn nil?
-	 [xs]
+	 (xs)
 	 (case xs
 	       [:cons x y] false
 	       [:nil] true))
        (defn first
-	 [xs]
+	 (xs)
 	 (case xs
 	       [:cons x xs] x
 	       [:nil] nil))
        (defn rest
-	 [xs]
+	 (xs)
 	 (case xs
 	       [:cons x xs] xs
 	       [:nil] nil))
        (defn map
-	 [f xs]
+	 (f xs)
 	 (case xs
 	       [:cons x xs]
 	       (let [x (strict x)]
 		 (cons (f x) (map f xs)))
 	       [:nil] nil))
        (defn map2
-	 [f xs ys]
+	 (f xs ys)
 	 (case xs
 	       [:cons x xs]
 	       (case ys
@@ -245,7 +245,7 @@
 		     [:nil] nil)
 	       [:nil] nil))
        (defn nth
-	 [xs n]
+	 (xs n)
 	 (case xs
 	       [:cons x xs]
 	       (if (= n 0)
@@ -254,33 +254,33 @@
 	       [:nil]
 	       nil))
        (defn iterate
-	 [f val]
+	 (f val)
 	 (cons val (iterate f (strict (f val)))))
        (def integers (iterate (+ 1) 0))
        (defn take
-	 [n xs]
+	 (n xs)
 	 (if (= n 0)
 	   nil
 	   (case xs
 		 [:cons x xs] (cons x (take (strict (- n 1)) xs))
 		 [:nil] nil)))
        (defn append
-	 [xs ys]
+	 (xs ys)
 	 (case xs
 	       [:cons x xs] (cons x (append xs ys))
 	       [:nil] ys))
        (defn cycle
-	 [xs]
+	 (xs)
 	 (letrec [ys (append xs ys)] ys))
        (defn foldl
-	 [f init xs]
+	 (f init xs)
 	 (case xs
 	       [:cons x xs]
 	       (foldl f (strict (f init x)) xs)
 	       [:nil]
 	       init))
        (defn foldr
-	 [f init xs]
+	 (f init xs)
 	 (case xs
 	       [:cons x xs]
 	       (f x (foldr f init xs))

@@ -1,14 +1,60 @@
 # strange
 
-FIXME: write description
+A lazy functional programming language.
 
 ## Usage
 
-FIXME: write
+To run the repl, run the standalone jar
 
-## Installation
+## Language Documentation
 
-FIXME: write
+Special forms:
+(quote form) - Return form, unevaluated
+
+(if pred t f) - When the result is required, strictly evaluate pred in the
+  current lexical environment, and evaluate t if pred is true, else evaluate f.
+
+(let (bindings*) form) - Evaluate form in the current lexical environment with
+  the extra bindings supplied.  Bindings take the form 'symbol value', as in
+  Clojure.  The creation of the bindings is strict.
+
+(letrec (bindings*) form) - Just like let, only the bindings are evaluated in
+  an environment containing themselves.
+
+(case value cases*) - Destructuring and pattern matching.  Each cases is of the
+  form 'pattern form'.  Tries to match value against each pattern in turn, and
+  on the first pattern that matches, evaluates form with in the current lexical
+  environment extended with the pattern variables.  Vectors are matched
+  recursively, non-symbols match based on equality, and symbols will match
+  anything as long as the same symbols match the same thing.  For example:
+  1 and 2 would not match. 1 and 1 would match. 1 and x would match.
+  [:foo 1] and x would match.  [:foo 1] and [:foo x] would match.
+  [:bar 1 2] and [:bar x x] would not match.  [:bar 1 2] and [:bar x y] would
+  match.  Matching is strict.
+
+(fn (args*) form) - Create an anonymous function taking args.  When called, it
+  will evaluate form in the current lexical enviroment extended by its arguments
+  bound to args.
+
+(prim function args*) - Strictly call a Clojure named by function with the given
+  arguments strictly evaluated in the current lexical environment.
+
+(strict form) - Strictly evaluate form in the current lexical environment.
+
+(adt type args*) - Strictly create an ADT of type with the given arguments
+  evaluated in the current lexical environment.  For instance,
+  (adt :foo 1 2) will create [:foo 1 2].
+
+(f args*) - Regular application.  When the result is required, strictly evaluate
+  f to get a function, and call f with the evaluated arguments in the current
+  lexical environment.  If f takes more arguments than supplied, return f
+  curried with the current arguments.
+
+(def name form) - Toplevel only.  Define name to be the value that form
+  evaluates too.
+
+(defn name (args*) form) - Toplevel only.  Conceptually the same as
+  (def name (fn (args*) form)).
 
 ## License
 
