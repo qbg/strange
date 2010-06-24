@@ -24,13 +24,13 @@ Special forms:
 (case value cases*) - Destructuring and pattern matching.  Each cases is of the
   form 'pattern form'.  Tries to match value against each pattern in turn, and
   on the first pattern that matches, evaluates form with in the current lexical
-  environment extended with the pattern variables.  Vectors are matched
+  environment extended with the pattern variables.  Lists are matched
   recursively, non-symbols match based on equality, and symbols will match
   anything as long as the same symbols match the same thing.  For example:
   1 and 2 would not match. 1 and 1 would match. 1 and x would match.
-  [:foo 1] and x would match.  [:foo 1] and [:foo x] would match.
-  [:bar 1 2] and [:bar x x] would not match.  [:bar 1 2] and [:bar x y] would
-  match.  Matching is strict.
+  (adt :foo 1) and x would match.  (adt :foo 1) and (:foo x) would match.
+  (adt :bar 1 2) and (:bar x x) would not match.  (adt :bar 1 2) and (:bar x y)
+  would match.  Matching is strict.
 
 (fn (args*) form) - Create an anonymous function taking args.  When called, it
   will evaluate form in the current lexical enviroment extended by its arguments
@@ -42,8 +42,7 @@ Special forms:
 (strict form) - Strictly evaluate form in the current lexical environment.
 
 (adt type args*) - Strictly create an ADT of type with the given arguments
-  evaluated in the current lexical environment.  For instance,
-  (adt :foo 1 2) will create [:foo 1 2].
+  evaluated in the current lexical environment.
 
 (f args*) - Regular application.  When the result is required, strictly evaluate
   f to get a function, and call f with the evaluated arguments in the current
@@ -53,7 +52,7 @@ Special forms:
 (def name form) - Toplevel only.  Define name to be the value that form
   evaluates too.
 
-(defn name (args*) form) - Toplevel only.  Conceptually the same as
+(def (name args*) form) - Toplevel only.  Conceptually the same as
   (def name (fn (args*) form)).
 
 ## License

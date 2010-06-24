@@ -135,7 +135,9 @@
   [f vals]
   (let [[vars args] (split-at (count vals) (f 3))
 	env (merge (f 2) (zipmap vars vals))]
-    [:fn (f 1) env args (f 4)]))
+    (if (seq args)
+      [:fn (f 1) env args (f 4)]
+      (throw (Exception. (format "Too many arguments applied to %s" (f 1)))))))
 
 (defn- eval-app
   [form env]
@@ -178,13 +180,10 @@
 (defn- eval-def
   [form]
   (let [[_ name body] form]
-    (swap! environment assoc name (s-eval body {}))
-    name))
-
-(defn- eval-defn
-  [form]
-  (let [[_ name args body] form]
-    (swap! environment assoc name [:fn name {} args body])
+    (if (sequential? name)
+      (let [[name & args] name]
+	(swap! environment assoc name [:fn name {} args body]))
+      (swap! environment assoc name (s-eval body {})))
     name))
 
 (defn toplevel-eval
@@ -193,7 +192,6 @@
   (cond
    (not (sequential? form)) (force-thunk (s-eval form {}))
    (= 'def (first form)) (eval-def form)
-   (= 'defn (first form)) (eval-defn form)
    :else (force-thunk (s-eval form {}))))
 
 (defn print-defs
@@ -201,91 +199,72 @@
   []
   (println (sort (keys @environment))))
 
+(defn print-source
+  "Print out the source of a function"
+  [f]
+  (if (or (not (vector? f)) (not= :fn (first f)))
+    (throw (Exception. "Cannot print source of a non-function")))
+  (let [[_ _ {} args body] f]
+    (println `(~'fn (~@args) ~body))))
+
 (def stdlib
-     '((defn + (x y) (prim + x y))
-       (defn - (x y) (prim - x y))
-       (defn * (x y) (prim * x y))
-       (defn / (x y) (prim / x y))
-       (defn = (x y) (prim = x y))
-       (defn eval (code) (prim strange.core/toplevel-eval code))
-       (defn defs () (prim strange.core/print-defs))
-       (defn cons (x xs) (adt :cons x xs))
+     '[(def (+ x y) (prim + x y))
+       (def (- x y) (prim - x y))
+       (def (* x y) (prim * x y))
+       (def (/ x y) (prim / x y))
+       (def (= x y) (prim = x y))
+       (def (eval code) (prim strange.core/toplevel-eval code))
+       (def (defs) (prim strange.core/print-defs))
+       (def (print-source f) (prim strange.core/print-source f))
+       (def (cons x xs) (adt :cons x xs))
        (def nil (adt :nil))
-       (defn nil?
-	 (xs)
+       (def (nil? xs) (case xs (:cons x y) false (:nil) true))
+       (def (first xs) (case xs (:cons x xs) x (:nil) nil))
+       (def (rest xs) (case xs (:cons x xs) xs (:nil) nil))
+       (def (map f xs)
 	 (case xs
-	       [:cons x y] false
-	       [:nil] true))
-       (defn first
-	 (xs)
+	   (:cons x xs)
+	   (let (x (strict x)) (cons (f x) (map f xs)))
+	   (:nil) nil))
+       (def (zip f xs ys)
 	 (case xs
-	       [:cons x xs] x
-	       [:nil] nil))
-       (defn rest
-	 (xs)
+	   (:cons x xs)
+	   (case ys
+	     (:cons y ys)
+	     (let (x (strict x)
+		   y (strict y))
+	       (cons (f x y) (zip f xs ys)))
+	     (:nil) nil)
+	   (:nil) nil))
+       (def (nth xs n)
 	 (case xs
-	       [:cons x xs] xs
-	       [:nil] nil))
-       (defn map
-	 (f xs)
-	 (case xs
-	       [:cons x xs]
-	       (let [x (strict x)]
-		 (cons (f x) (map f xs)))
-	       [:nil] nil))
-       (defn map2
-	 (f xs ys)
-	 (case xs
-	       [:cons x xs]
-	       (case ys
-		     [:cons y ys]
-		     (let [x (strict x)
-			   y (strict y)]
-		       (cons (f x y) (map2 f xs ys)))
-		     [:nil] nil)
-	       [:nil] nil))
-       (defn nth
-	 (xs n)
-	 (case xs
-	       [:cons x xs]
-	       (if (= n 0)
-		 x
-		 (nth xs (strict (- n 1))))
-	       [:nil]
-	       nil))
-       (defn iterate
-	 (f val)
-	 (cons val (iterate f (strict (f val)))))
+	   (:cons x xs)
+	   (if (= n 0)
+	     x
+	     (nth xs (strict (- n 1))))
+	   (:nil)
+	   nil))
+       (def (iterate f val) (cons val (iterate f (strict (f val)))))
        (def integers (iterate (+ 1) 0))
-       (defn take
-	 (n xs)
+       (def (take n xs)
 	 (if (= n 0)
 	   nil
 	   (case xs
-		 [:cons x xs] (cons x (take (strict (- n 1)) xs))
-		 [:nil] nil)))
-       (defn append
-	 (xs ys)
+	     (:cons x xs) (cons x (take (strict (- n 1)) xs))
+	     (:nil) nil)))
+       (def (append xs ys)
 	 (case xs
-	       [:cons x xs] (cons x (append xs ys))
-	       [:nil] ys))
-       (defn cycle
-	 (xs)
-	 (letrec [ys (append xs ys)] ys))
-       (defn foldl
-	 (f init xs)
+	   (:cons x xs) (cons x (append xs ys))
+	   (:nil) ys))
+       (def (cycle xs) (letrec (ys (append xs ys)) ys))
+       (def (foldl f init xs)
 	 (case xs
-	       [:cons x xs]
-	       (foldl f (strict (f init x)) xs)
-	       [:nil]
-	       init))
-       (defn foldr
-	 (f init xs)
-	 (case xs
-	       [:cons x xs]
-	       (f x (foldr f init xs))
-	       [:nil]
-	       init))))
+	   (:cons x xs) (foldl f (strict (f init x)) xs)
+	   (:nil) init))
+       (def (foldr f init xs)
+	  (case xs
+	    (:cons x xs) (f x (foldr f init xs))
+	    (:nil) init))])
 
 (defn eval-program
   "Evaluate a program and return its last value in a new enviornment"
