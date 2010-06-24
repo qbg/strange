@@ -20,18 +20,24 @@
 	    val))
 	val))))
 
-(defn- convert-seq
+(declare internalize)
+
+(defn- internalize-seq
   [coll]
   (if (seq coll)
-    [:cons (first coll) (delay (convert-seq (rest coll)))]
+    [:cons (internalize (first coll)) (delay (internalize-seq (rest coll)))]
     [:nil]))
+
+(defn- internalize
+  [form]
+  (if (sequential? form)
+    (internalize-seq form)
+    form))
 
 (defn- eval-quote
   [form env]
   (let [form (second form)]
-    (if (sequential? form)
-      (convert-seq form)
-      form)))
+    (internalize form)))
 
 (defn- eval-if
   [form env]
@@ -75,14 +81,15 @@
 	(merge asserts {pattern value}))
 
       (sequential? pattern)
-      (if (and (sequential? value) (= (count pattern) (count value)))
-	(if (seq pattern)
-	  (recur (next pattern) (next value)
-		 (pattern-match (first pattern) (first value) asserts))
-	  asserts))
+      (let [value (force-thunk value)]
+	(if (and (sequential? value) (= (count pattern) (count value)))
+	  (if (seq pattern)
+	    (recur (next pattern) (next value)
+		   (pattern-match (first pattern) (first value) asserts))
+	    asserts)))
 
       :else
-      (if (= pattern value)
+      (if (= pattern (force-thunk value))
 	asserts))))
      
 (defn- eval-case
@@ -227,6 +234,8 @@
 	 (adt :fn :anonymous (strict env)
 	      (strict (primitive-form args))
 	      (strict (primitive-form body))))
+       (def (eval-in-env form env)
+	 ((make-fn env '() form)))
        (def (cons x xs) (adt :cons x xs))
        (def nil (adt :nil))
        (def (nil? xs) (case xs (:cons x y) false (:nil) true))
@@ -279,9 +288,22 @@
 	   (:cons x xs) (foldl f (strict (f init x)) xs)
 	   (:nil) init))
        (def (foldr f init xs)
-	  (case xs
-	    (:cons x xs) (f x (foldr f init xs))
-	    (:nil) init))])
+	 (case xs
+	   (:cons x xs) (f x (foldr f init xs))
+	   (:nil) init))
+       (def (quasiquote form env)
+	 (case form
+	   (:cons :unquote (:cons u-form (:nil)))
+	   (eval-in-env u-form env)
+
+	   (:cons (:cons :unquote-splice (:cons u-form (:nil))) xs)
+	   (append (eval-in-env u-form env) (quasiquote xs env))
+
+	   (:cons x xs)
+	   (cons (quasiquote x env) (quasiquote xs env))
+
+	   x
+	   x))])
 
 (defn eval-program
   "Evaluate a program and return its last value in a new enviornment"
