@@ -119,7 +119,8 @@
 	 f (externalize (force-thunk f))
 	 r (force-thunk r)]
      (lazy-seq
-      (cons f (externalize r))))))
+      (cons f (externalize r))))
+   :else val))
 
 (defn- eval-prim
   [form env]
@@ -252,6 +253,12 @@
 	   (case xs
 	     (:cons x xs) (cons x (take (strict (- n 1)) xs))
 	     (:nil) nil)))
+       (def (drop n xs)
+	 (if (= n 0)
+	   xs
+	   (case xs
+	     (:cons x xs) (drop (strict (- n 1)) xs)
+	     (:nil) nil)))
        (def (append xs ys)
 	 (case xs
 	   (:cons x xs) (cons x (append xs ys))
@@ -332,6 +339,6 @@
 	(try
 	  (print-val (toplevel-eval form))
 	  (println)
-	  (catch Exception e (println (str e))))
+	  (catch Exception e (println "Error:" (.getMessage e))))
 	(println)
 	(recur)))))
