@@ -109,7 +109,7 @@
   (let [[_ args body] form]
     [:fn :anonymous env args body]))
 
-(defn- externalize
+(defn externalize
   [val]
   (cond
    (not (sequential? val)) val
@@ -161,6 +161,10 @@
 	args (map #(s-eval % env) args)]
     (apply vector type args)))
 
+(defn- eval-env
+  [form env]
+  env)
+
 (defn- s-eval
   [form env]
   (cond
@@ -176,6 +180,7 @@
    (= 'strict (first form)) (eval-strict form env)
    (= 'prim (first form)) (eval-prim form env)
    (= 'adt (first form)) (eval-adt form env)
+   (= 'environment (first form)) (eval-env form env)
    :else (eval-app form env)))
 
 (defn- eval-def
@@ -217,6 +222,11 @@
        (def (eval code) (prim strange.core/toplevel-eval code))
        (def (defs) (prim strange.core/print-defs))
        (def (print-source f) (prim strange.core/print-source f))
+       (def (primitive-form form) (prim strange.core/externalize form))
+       (def (make-fn env args body)
+	 (adt :fn :anonymous (strict env)
+	      (strict (primitive-form args))
+	      (strict (primitive-form body))))
        (def (cons x xs) (adt :cons x xs))
        (def nil (adt :nil))
        (def (nil? xs) (case xs (:cons x y) false (:nil) true))
@@ -307,14 +317,16 @@
 
 (defn- print-fn
   [val]
-  (let [[_ name env args body] val]
-    (print (format "#<Function %s %s>" name (apply vector args)))))
+  (let [[_ name env args body] val
+	arg-str (if (seq args) (str (apply list args)) "()")]
+    (print (format "#<Function %s %s>" name arg-str))))
 
 (defn print-val
   "Print a returned value"
   [val]
   (let [val (force-thunk val)]
     (cond
+     (map? val) (print "#<Environment>")
      (not (vector? val)) (print val)
      (= :nil (first val)) (print nil)
      (= :cons (first val)) (print-list val)
