@@ -317,6 +317,21 @@
 	((make-fn :anonymous env '() (macroexpand form)))))
 (set! eval (fn (form) (eval-in-env form toplevel-env)))
 
+;; Name all of the above functions
+(set! bound? (strict (name-fn 'bound? bound?)))
+(set! symbol? (strict (name-fn 'symbol? symbol?)))
+(set! cons (strict (name-fn 'cons cons)))
+(set! primitive-form (strict (name-fn 'primitive-form primitive-form)))
+(set! make-fn (strict (name-fn 'make-fn make-fn)))
+(set! name-fn (strict (name-fn 'name-fn name-fn)))
+(set! append (strict (name-fn 'append append)))
+(set! quasiquote (strict (name-fn 'quasiquote quasiquote)))
+(set! macroexpand-bindings (strict (name-fn 'macroexpand-bindings macroexpand-bindings)))
+(set! map-macroexpand (strict (name-fn 'map-macroexpand map-macroexpand)))
+(set! macroexpand (strict (name-fn 'macroexpand macroexpand)))
+(set! eval-in-env (strict (name-fn 'eval-in-env eval-in-env)))
+(set! eval (strict (name-fn 'eval eval)))
+
 ;; The standard library
 (def (+ x y) (prim + x y))
 (def (- x y) (prim - x y))
