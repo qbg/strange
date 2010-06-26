@@ -9,16 +9,13 @@
     (recur @thunk)
     thunk))
 
-(let [no-val (gensym)]
-  (defn- eval-symbol
-    [form env]
-    (let [val (env form no-val)]
-      (if (= val no-val)
-	(let [val (@environment form no-val)]
-	  (if (= val no-val)
-	    (throw (Exception. (format "%s is undefined" form)))
-	    val))
-	val))))
+(defn- eval-symbol
+  [form env]
+  (if (contains? env form)
+    (env form)
+    (if (contains? @environment form)
+      (@environment form)
+      (throw (Exception. (format "%s is undefined" form))))))
 
 (declare internalize)
 
@@ -30,7 +27,7 @@
 
 (defn- internalize
   [form]
-  (if (sequential? form)
+  (if (and (sequential? form) (not (vector? form)))
     (internalize-seq form)
     form))
 
@@ -80,6 +77,10 @@
 	  asserts)
 	(merge asserts {pattern value}))
 
+      (and (sequential? pattern) (= 'quote (first pattern)))
+      (if (= (second pattern) (force-thunk value))
+	asserts)
+
       (sequential? pattern)
       (let [value (force-thunk value)]
 	(if (and (sequential? value) (= (count pattern) (count value)))
@@ -118,16 +119,17 @@
 
 (defn externalize
   [val]
-  (cond
-   (not (sequential? val)) val
-   (= :nil (first val)) nil
-   (= :cons (first val))
-   (let [[_ f r] val
-	 f (externalize (force-thunk f))
-	 r (force-thunk r)]
-     (lazy-seq
-      (cons f (externalize r))))
-   :else val))
+  (let [val (force-thunk val)]
+    (cond
+     (not (sequential? val)) val
+     (= :nil (first val)) nil
+     (= :cons (first val))
+     (let [[_ f r] val
+	   f (externalize (force-thunk f))
+	   r (force-thunk r)]
+       (lazy-seq
+	(cons f (externalize r))))
+     :else val)))
 
 (defn- eval-prim
   [form env]
@@ -153,7 +155,7 @@
    (let [[f & args] form
 	 f (force-thunk (s-eval f env))
 	 args (map #(s-eval % env) args)]
-     (if (or (not (vector? f)) (not= (f 0) :fn))
+     (when (or (not (vector? f)) (not= (f 0) :fn))
        (throw (Exception.
 	       (format "Tried to call a non-function when executing %s"
 		       form))))
@@ -172,6 +174,12 @@
   [form env]
   env)
 
+(defn- eval-set!
+  [form env]
+  (let [[_ name body] form]
+    (swap! environment assoc name (s-eval body env))
+    name))
+
 (defn- s-eval
   [form env]
   (cond
@@ -188,122 +196,192 @@
    (= 'prim (first form)) (eval-prim form env)
    (= 'adt (first form)) (eval-adt form env)
    (= 'environment (first form)) (eval-env form env)
+   (= 'set! (first form)) (eval-set! form env)
    :else (eval-app form env)))
-
-(defn- eval-def
-  [form]
-  (let [[_ name body] form]
-    (if (sequential? name)
-      (let [[name & args] name]
-	(swap! environment assoc name [:fn name {} args body]))
-      (swap! environment assoc name (s-eval body {})))
-    name))
-
-(defn toplevel-eval
-  "Given a form, evaluate it and return its value"
-  [form]
-  (cond
-   (not (sequential? form)) (force-thunk (s-eval form {}))
-   (= 'def (first form)) (eval-def form)
-   :else (force-thunk (s-eval form {}))))
 
 (defn print-defs
   "Print out a list of all of the loaded definitions"
   []
   (println (sort (keys @environment))))
 
-(defn print-source
-  "Print out the source of a function"
-  [f]
-  (if (or (not (vector? f)) (not= :fn (first f)))
-    (throw (Exception. "Cannot print source of a non-function")))
-  (let [[_ _ {} args body] f]
-    (println `(~'fn (~@args) ~body))))
+(defn bound-toplevel?
+  [sym]
+  (contains? @environment sym))
 
-(def stdlib
-     '[(def (+ x y) (prim + x y))
-       (def (- x y) (prim - x y))
-       (def (* x y) (prim * x y))
-       (def (/ x y) (prim / x y))
-       (def (= x y) (prim = x y))
-       (def (eval code) (prim strange.core/toplevel-eval code))
-       (def (defs) (prim strange.core/print-defs))
-       (def (print-source f) (prim strange.core/print-source f))
-       (def (primitive-form form) (prim strange.core/externalize form))
-       (def (make-fn env args body)
-	 (adt :fn :anonymous (strict env)
-	      (strict (primitive-form args))
-	      (strict (primitive-form body))))
-       (def (eval-in-env form env)
-	 ((make-fn env '() form)))
-       (def (cons x xs) (adt :cons x xs))
-       (def nil (adt :nil))
-       (def (nil? xs) (case xs (:cons x y) false (:nil) true))
-       (def (first xs) (case xs (:cons x xs) x (:nil) nil))
-       (def (rest xs) (case xs (:cons x xs) xs (:nil) nil))
-       (def (map f xs)
-	 (case xs
-	   (:cons x xs)
-	   (let (x (strict x)) (cons (f x) (map f xs)))
-	   (:nil) nil))
-       (def (zip f xs ys)
-	 (case xs
-	   (:cons x xs)
-	   (case ys
-	     (:cons y ys)
-	     (let (x (strict x)
-		   y (strict y))
-	       (cons (f x y) (zip f xs ys)))
-	     (:nil) nil)
-	   (:nil) nil))
-       (def (nth xs n)
-	 (case xs
-	   (:cons x xs)
-	   (if (= n 0)
-	     x
-	     (nth xs (strict (- n 1))))
-	   (:nil)
-	   nil))
-       (def (iterate f val) (cons val (iterate f (strict (f val)))))
-       (def integers (iterate (+ 1) 0))
-       (def (take n xs)
-	 (if (= n 0)
-	   nil
-	   (case xs
-	     (:cons x xs) (cons x (take (strict (- n 1)) xs))
-	     (:nil) nil)))
-       (def (drop n xs)
-	 (if (= n 0)
-	   xs
-	   (case xs
-	     (:cons x xs) (drop (strict (- n 1)) xs)
-	     (:nil) nil)))
-       (def (append xs ys)
-	 (case xs
-	   (:cons x xs) (cons x (append xs ys))
-	   (:nil) ys))
-       (def (cycle xs) (letrec (ys (append xs ys)) ys))
-       (def (foldl f init xs)
-	 (case xs
-	   (:cons x xs) (foldl f (strict (f init x)) xs)
-	   (:nil) init))
-       (def (foldr f init xs)
-	 (case xs
-	   (:cons x xs) (f x (foldr f init xs))
-	   (:nil) init))
-       (def (quasiquote form env)
-	 (case form
-	   (:cons :unquote (:cons u-form (:nil)))
-	   (eval-in-env u-form env)
+(def stdlib '[
 
-	   (:cons (:cons :unquote-splice (:cons u-form (:nil))) xs)
-	   (append (eval-in-env u-form env) (quasiquote xs env))
+;; Bootstrap the system
+(set! toplevel-env (environment))
+(set! bound? (fn (sym) (prim strange.core/bound-toplevel? sym)))
+(set! symbol? (fn (form) (prim symbol? form)))
+(set! cons (fn (x xs) (adt :cons x xs)))
+(set! nil (adt :nil))
+(set! primitive-form (fn (form) (prim strange.core/externalize form)))
+(set! make-fn
+      (fn (name env args body)
+	(adt :fn
+	     (strict name)
+	     (strict env)
+	     (strict (primitive-form args))
+	     (strict (primitive-form body)))))
+(set! name-fn
+      (fn (name f)
+	(case f
+	  (:fn _ env args body) (adt :fn name env args body))))
+(set! eval-in-env ; Bootstrap version
+      (fn (form env)
+	((make-fn :anonymous env '() form))))
+(set! append
+      (fn (xs ys)
+	(case xs
+	  (:cons x xs) (cons x (append xs ys))
+	  (:nil) ys)))
+(set! quasiquote
+      (fn (form env)
+	(case form
+	  (:cons 'unquote (:cons u-form (:nil)))
+	  (eval-in-env u-form env)
 
-	   (:cons x xs)
-	   (cons (quasiquote x env) (quasiquote xs env))
+	  (:cons (:cons 'unquote-splice (:cons u-form (:nil))) xs)
+	  (append (eval-in-env u-form env) (quasiquote xs env))
 
-	   x
-	   x))])
+	  (:cons x xs)
+	  (cons (quasiquote x env) (quasiquote xs env))
+
+	  x
+	  x)))
+(set! macroexpand-bindings
+      (fn (bindings)
+	(case bindings
+	  (:cons var (:cons val xs))
+	  (cons var (cons (macroexpand val) (macroexpand-bindings xs)))
+
+	  (:nil)
+	  nil)))
+(set! map-macroexpand
+      (fn (forms)
+	(case forms
+	  (:cons form forms) (cons (macroexpand form) (map-macroexpand forms))
+	  (:nil) nil)))
+(set! macroexpand
+      (fn (form)
+	(case form
+	  (:cons 'quote x)
+	  form
+
+	  (:cons 'let (:cons bindings (:cons body (:nil))))
+	  (cons 'let (cons (macroexpand-bindings bindings)
+			   (cons (macroexpand body) nil)))
+
+	  (:cons 'letrec (:cons bindings (:cons body (:nil))))
+	  (cons 'letrec (cons (macroexpand-bindings bindings)
+			      (cons (macroexpand body) nil)))
+
+	  (:cons 'case (:cons val bindings))
+	  (cons 'case (cons (macroexpand val) (macroexpand-bindings bindings)))
+
+	  (:cons 'fn (:cons params (:cons body (:nil))))
+	  (cons 'fn (cons params (cons (macroexpand body) nil)))
+
+	  ;; if, strict, prim, adt, environment, and set! don't need cases
+
+	  (:cons name args)
+	  (if (symbol? name)
+	    (if (bound? name)
+	      (case (eval-in-env name toplevel-env)
+		    (:macro expand-f) (macroexpand (expand-f form))
+		    x (cons name (map-macroexpand args)))
+	      (cons name (map-macroexpand args)))
+	    (cons name (map-macroexpand args)))
+
+	  x
+	  x)))
+(set! def
+      (adt :macro
+	   (fn (form)
+	     (case form
+	       (:cons 'def (:cons (:cons name args) (:cons body (:nil))))
+	       (quasiquote
+		'(set! (unquote name)
+		       (name-fn (quote (unquote name))
+				(fn (unquote args) (unquote body))))
+		(environment))
+
+	       (:cons 'def (:cons name (:cons val (:nil))))
+	       (quasiquote '(set! (unquote name) (unquote val))
+			   (environment))))))
+
+;; Install the improved eval
+(set! eval-in-env
+      (fn (form env)
+	((make-fn :anonymous env '() (macroexpand form)))))
+(set! eval (fn (form) (eval-in-env form toplevel-env)))
+
+;; The standard library
+(def (+ x y) (prim + x y))
+(def (- x y) (prim - x y))
+(def (* x y) (prim * x y))
+(def (/ x y) (prim / x y))
+(def (= x y) (prim = x y))
+(def (defs) (prim strange.core/print-defs))
+(def (nil? xs) (case xs (:cons x y) false (:nil) true))
+(def (first xs) (case xs (:cons x xs) x (:nil) nil))
+(def (rest xs) (case xs (:cons x xs) xs (:nil) nil))
+(def (map f xs)
+  (case xs
+    (:cons x xs)
+    (let (x (strict x)) (cons (f x) (map f xs)))
+    (:nil) nil))
+(def (zip f xs ys)
+  (case xs
+    (:cons x xs)
+    (case ys
+      (:cons y ys)
+      (let (x (strict x)
+	      y (strict y))
+	(cons (f x y) (zip f xs ys)))
+      (:nil) nil)
+    (:nil) nil))
+(def (nth xs n)
+  (case xs
+    (:cons x xs)
+    (if (= n 0)
+      x
+      (nth xs (strict (- n 1))))
+    (:nil)
+    nil))
+(def (iterate f val) (cons val (iterate f (strict (f val)))))
+(def integers (iterate (+ 1) 0))
+(def (take n xs)
+  (if (= n 0)
+    nil
+    (case xs
+      (:cons x xs) (cons x (take (strict (- n 1)) xs))
+      (:nil) nil)))
+(def (drop n xs)
+  (if (= n 0)
+    xs
+    (case xs
+      (:cons x xs) (drop (strict (- n 1)) xs)
+      (:nil) nil)))
+(def (cycle xs) (letrec (ys (append xs ys)) ys))
+(def (foldl f init xs)
+  (case xs
+    (:cons x xs) (foldl f (strict (f init x)) xs)
+    (:nil) init))
+(def (foldr f init xs)
+  (case xs
+    (:cons x xs) (f x (foldr f init xs))
+    (:nil) init))
+
+]) ; End of stdlib
+
+(defn interactive-eval
+  "Evaluate form using the interactive evaluator"
+  [form]
+  (if (contains? @environment 'eval)
+    (force-thunk (s-eval `(~'eval '~form) {}))
+    (force-thunk (s-eval form {}))))
 
 (defn eval-program
   "Evaluate a program and return its last value in a new enviornment"
@@ -311,7 +389,7 @@
   (reset! environment {})
   (loop [program (concat stdlib program), val nil]
     (if (seq program)
-      (recur (next program) (toplevel-eval (first program)))
+      (recur (next program) (interactive-eval (first program)))
       val)))
 
 (declare print-val)
@@ -371,7 +449,7 @@
     (let [form (safe-read)]
       (when (not (= form :quit)) 
 	(try
-	  (print-val (toplevel-eval form))
+	  (print-val (interactive-eval form))
 	  (println)
 	  (catch Exception e (println "Error:" (.getMessage e))))
 	(println)
