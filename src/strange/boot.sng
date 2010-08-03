@@ -1,0 +1,178 @@
+;; Bootstrap the system
+(set! toplevel-env (environment))
+(set! bound? (fn (sym) (prim strange.core/bound-toplevel? sym)))
+(set! symbol? (fn (form) (prim symbol? form)))
+(set! cons (fn (x xs) (adt :cons x xs)))
+(set! nil (adt :nil))
+(set! primitive-form (fn (form) (prim strange.core/externalize form)))
+(set! make-fn
+      (fn (name env args body)
+	(adt :fn
+	     (strict name)
+	     (strict env)
+	     (strict (primitive-form args))
+	     (strict (primitive-form body)))))
+(set! name-fn
+      (fn (name f)
+	(case f
+	  (:fn _ env args body) (adt :fn name env args body))))
+(set! eval-in-env ; Bootstrap version
+      (fn (form env)
+	((make-fn :anonymous env '() form))))
+(set! append
+      (fn (xs ys)
+	(case xs
+	  (:cons x xs) (cons x (append xs ys))
+	  (:nil) ys)))
+(set! quasiquote
+      (fn (form env)
+	(case form
+	  (:cons 'unquote (:cons u-form (:nil)))
+	  (eval-in-env u-form env)
+
+	  (:cons (:cons 'unquote-splice (:cons u-form (:nil))) xs)
+	  (append (eval-in-env u-form env) (quasiquote xs env))
+
+	  (:cons x xs)
+	  (cons (quasiquote x env) (quasiquote xs env))
+
+	  x
+	  x)))
+(set! macroexpand-bindings
+      (fn (bindings)
+	(case bindings
+	  (:cons var (:cons val xs))
+	  (cons var (cons (macroexpand val) (macroexpand-bindings xs)))
+
+	  (:nil)
+	  nil)))
+(set! map-macroexpand
+      (fn (forms)
+	(case forms
+	  (:cons form forms) (cons (macroexpand form) (map-macroexpand forms))
+	  (:nil) nil)))
+(set! macroexpand
+      (fn (form)
+	(case form
+	  (:cons 'quote x)
+	  form
+
+	  (:cons 'let (:cons bindings (:cons body (:nil))))
+	  (cons 'let (cons (macroexpand-bindings bindings)
+			   (cons (macroexpand body) nil)))
+
+	  (:cons 'letrec (:cons bindings (:cons body (:nil))))
+	  (cons 'letrec (cons (macroexpand-bindings bindings)
+			      (cons (macroexpand body) nil)))
+
+	  (:cons 'case (:cons val bindings))
+	  (cons 'case (cons (macroexpand val) (macroexpand-bindings bindings)))
+
+	  (:cons 'fn (:cons params (:cons body (:nil))))
+	  (cons 'fn (cons params (cons (macroexpand body) nil)))
+
+	  ;; if, strict, prim, adt, environment, and set! don't need cases
+
+	  (:cons name args)
+	  (if (symbol? name)
+	    (if (bound? name)
+	      (case (eval-in-env name toplevel-env)
+		    (:macro expand-f) (macroexpand (expand-f form))
+		    x (cons name (map-macroexpand args)))
+	      (cons name (map-macroexpand args)))
+	    (cons name (map-macroexpand args)))
+
+	  x
+	  x)))
+(set! def
+      (adt :macro
+	   (fn (form)
+	     (case form
+	       (:cons 'def (:cons (:cons name args) (:cons body (:nil))))
+	       (quasiquote
+		'(set! (unquote name)
+		       (name-fn (quote (unquote name))
+				(fn (unquote args) (unquote body))))
+		(environment))
+
+	       (:cons 'def (:cons name (:cons val (:nil))))
+	       (quasiquote '(set! (unquote name) (unquote val))
+			   (environment))))))
+
+;; Install the improved eval
+(set! eval-in-env
+      (fn (form env)
+	((make-fn :anonymous env '() (macroexpand form)))))
+(set! eval (fn (form) (eval-in-env form toplevel-env)))
+
+;; Name all of the above functions
+(set! bound? (strict (name-fn 'bound? bound?)))
+(set! symbol? (strict (name-fn 'symbol? symbol?)))
+(set! cons (strict (name-fn 'cons cons)))
+(set! primitive-form (strict (name-fn 'primitive-form primitive-form)))
+(set! make-fn (strict (name-fn 'make-fn make-fn)))
+(set! name-fn (strict (name-fn 'name-fn name-fn)))
+(set! append (strict (name-fn 'append append)))
+(set! quasiquote (strict (name-fn 'quasiquote quasiquote)))
+(set! macroexpand-bindings (strict (name-fn 'macroexpand-bindings macroexpand-bindings)))
+(set! map-macroexpand (strict (name-fn 'map-macroexpand map-macroexpand)))
+(set! macroexpand (strict (name-fn 'macroexpand macroexpand)))
+(set! eval-in-env (strict (name-fn 'eval-in-env eval-in-env)))
+(set! eval (strict (name-fn 'eval eval)))
+
+;; The standard library
+(def (+ x y) (prim + x y))
+(def (- x y) (prim - x y))
+(def (* x y) (prim * x y))
+(def (/ x y) (prim / x y))
+(def (= x y) (prim = x y))
+(def (defs) (prim strange.core/print-defs))
+(def (nil? xs) (case xs (:cons x y) false (:nil) true))
+(def (first xs) (case xs (:cons x xs) x (:nil) nil))
+(def (rest xs) (case xs (:cons x xs) xs (:nil) nil))
+(def (map f xs)
+  (case xs
+    (:cons x xs)
+    (let (x (strict x)) (cons (f x) (map f xs)))
+    (:nil) nil))
+(def (zip f xs ys)
+  (case xs
+    (:cons x xs)
+    (case ys
+      (:cons y ys)
+      (let (x (strict x)
+	      y (strict y))
+	(cons (f x y) (zip f xs ys)))
+      (:nil) nil)
+    (:nil) nil))
+(def (nth xs n)
+  (case xs
+    (:cons x xs)
+    (if (= n 0)
+      x
+      (nth xs (strict (- n 1))))
+    (:nil)
+    nil))
+(def (iterate f val) (cons val (iterate f (strict (f val)))))
+(def integers (iterate (+ 1) 0))
+(def (take n xs)
+  (if (= n 0)
+    nil
+    (case xs
+      (:cons x xs) (cons x (take (strict (- n 1)) xs))
+      (:nil) nil)))
+(def (drop n xs)
+  (if (= n 0)
+    xs
+    (case xs
+      (:cons x xs) (drop (strict (- n 1)) xs)
+      (:nil) nil)))
+(def (cycle xs) (letrec (ys (append xs ys)) ys))
+(def (foldl f init xs)
+  (case xs
+    (:cons x xs) (foldl f (strict (f init x)) xs)
+    (:nil) init))
+(def (foldr f init xs)
+  (case xs
+    (:cons x xs) (f x (foldr f init xs))
+    (:nil) init))
