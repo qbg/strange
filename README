@@ -8,7 +8,7 @@ To run the repl, run the standalone jar
 
 ## Language Documentation
 
-Special forms:
+Some useful forms:
 (quote form) - Return form, unevaluated
 
 (if pred t f) - When the result is required, strictly evaluate pred in the
@@ -55,6 +55,9 @@ Special forms:
 (def (name args*) form) - Toplevel only.  Conceptually the same as
   (def name (fn (args*) form)).
 
+
+Examples of intended usage can be found at the bottom of src/strange/boot.sng
+
 ## License
 
-FIXME: write
+EPL 1.0, the same license as Clojure

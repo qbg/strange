@@ -283,6 +283,7 @@
   "Launch a repl"
   []
   (boot-system)
+  (println "System booted.")
   (loop []
     (print "> ")
     (.flush *out*)
